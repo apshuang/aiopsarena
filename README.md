@@ -1,21 +1,21 @@
-# MicroServo
+# AIOpsArena
 
 ## Introduction
 
-MicroServo is a comprehensive benchmarking framework designed for microservices systems, featuring three modes of data collection (logs, tracing, and performance metrics), customizable fault injection, support for online algorithm deployment and evaluation. This framework provides researchers and developers with a practical tool to generate, monitor, and diagnose various fault scenarios in a simulated production environment, while also evaluating algorithms.
+AIOpsArena is a comprehensive benchmarking framework designed for microservices systems, featuring three modes of data collection (logs, tracing, and performance metrics), customizable fault injection, support for online algorithm deployment and evaluation. This framework provides researchers and developers with a practical tool to generate, monitor, and diagnose various fault scenarios in a simulated production environment, while also evaluating algorithms.
 
 ![platform](imgs/主页.png)
 
 ## Purpose
 
-The primary goal of MicroServo is to enhance the resilience and efficiency of microservices systems. By offering detailed fault simulation and data collection tools, MicroServo enables researchers and industry practitioners to evaluate and optimize their algorithms in a controlled environment, ensuring the stability and scalability of microservices architectures.
+The primary goal of AIOpsArena is to enhance the resilience and efficiency of microservices systems. By offering detailed fault simulation and data collection tools, AIOpsArena enables researchers and industry practitioners to evaluate and optimize their algorithms in a controlled environment, ensuring the stability and scalability of microservices architectures.
 
 ## Features
 
-- Data Monitoring: MicroServo can automatically collect logs, traces, and performance metrics from microservices systems, processing them into labeled datasets for analysis and model training.
-- Fault Injection: Users can customize fault types and parameters using MicroServo to inject faults and test the system's recovery capabilities and the effectiveness of fault detection algorithms.
-- Online Algorithm Deployment: MicroServo supports the uploading and deployment of custom algorithms, enabling online algorithm testing and adjustment to enhance research and development efficiency and algorithm performance.
-- Algorithm Evaluation: After selecting the dataset and algorithms for evaluation, MicroServo begins an evaluation. And it also display the result of the evaluation in the form of Leaderboard.
+- Data Monitoring: AIOpsArena can automatically collect logs, traces, and performance metrics from microservices systems, processing them into labeled datasets for analysis and model training.
+- Fault Injection: Users can customize fault types and parameters using AIOpsArena to inject faults and test the system's recovery capabilities and the effectiveness of fault detection algorithms.
+- Online Algorithm Deployment: AIOpsArena supports the uploading and deployment of custom algorithms, enabling online algorithm testing and adjustment to enhance research and development efficiency and algorithm performance.
+- Algorithm Evaluation: After selecting the dataset and algorithms for evaluation, AIOpsArena begins an evaluation. And it also display the result of the evaluation in the form of Leaderboard.
 
 ## System Requirements
 
