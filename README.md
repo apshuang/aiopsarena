@@ -1,5 +1,7 @@
 # AIOpsArena
 
+👏👏 YouTube video presentation: [https://youtu.be/Z3AhNNQF1c0](https://youtu.be/Z3AhNNQF1c0)
+
 ## Introduction
 
 AIOpsArena is a comprehensive benchmarking framework designed for microservices systems, featuring three modes of data collection (logs, tracing, and performance metrics), customizable fault injection, support for online algorithm deployment and evaluation. This framework provides researchers and developers with a practical tool to generate, monitor, and diagnose various fault scenarios in a simulated production environment, while also evaluating algorithms.
