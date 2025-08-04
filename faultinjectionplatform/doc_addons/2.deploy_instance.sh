@@ -12,4 +12,4 @@ if minikube status | grep -q 'Running'; then
     minikube stop
 fi
 
-minikube start --image-mirror-country=cn --registry-mirror https://docker.mirrors.ustc.edu.cn --kubernetes-version=v1.26.3  --cpus=32 --memory 64768 --disk-size 150g
+minikube start --image-mirror-country=cn --registry-mirror https://docker.mirrors.ustc.edu.cn --kubernetes-version=v1.26 --cpus=32 --memory 64768 --disk-size 150g --container-runtime=containerd --driver=docker

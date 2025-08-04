@@ -43,14 +43,31 @@ fi
 cd observe
 kubectl create namespace observe
 
-docker pull ghcr.io/chaos-mesh/chaos-daemon:v2.5.1
-docker pull ghcr.io/chaos-mesh/chaos-dashboard:v2.5.1
-docker pull ghcr.io/chaos-mesh/chaos-mesh:v2.5.1
+# docker pull ghcr.io/chaos-mesh/chaos-daemon:v2.5.1
+# docker pull ghcr.io/chaos-mesh/chaos-dashboard:v2.5.1
+# docker pull ghcr.io/chaos-mesh/chaos-mesh:v2.5.1
+
+docker pull ghcr.io/chaos-mesh/chaos-daemon:v2.7.2
+docker pull ghcr.io/chaos-mesh/chaos-dashboard:v2.7.2
+docker pull ghcr.io/chaos-mesh/chaos-mesh:v2.7.2
 
 # Chaos-mesh (for fault injection)
 helm repo add chaos-mesh https://charts.chaos-mesh.org
 kubectl create ns chaos-mesh
-helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --version=2.5.1 --set "dashboard.env.DATABASE_DRIVER=mysql" --set "dashboard.env.DATABASE_DATASOURCE=root:elastic@tcp(10.10.1.202:3306)/chaos_mesh?parseTime=true" --set "dashboard.securityMode=false" --set "dashboard.env.TTL_EVENT=336h" --set "dashboard.env.TZ=Asia/Shanghai"
+# helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --version=2.5.1 --set "dashboard.env.DATABASE_DRIVER=mysql" --set "dashboard.env.DATABASE_DATASOURCE=root:elastic@tcp(11.11.11.44:3306)/chaos_mesh?parseTime=true" --set "dashboard.securityMode=false" --set "dashboard.env.TTL_EVENT=336h" --set "dashboard.env.TZ=Asia/Shanghai"
+
+helm install chaos-mesh chaos-mesh/chaos-mesh \
+  -n chaos-mesh \
+  --version=2.7.2 \
+  --set "dashboard.env.DATABASE_DRIVER=mysql" \
+  --set "dashboard.env.DATABASE_DATASOURCE=root:elastic@tcp(11.11.11.44:3306)/chaos_mesh?parseTime=true" \
+  --set "dashboard.securityMode=false" \
+  --set "dashboard.env.TTL_EVENT=336h" \
+  --set "dashboard.env.TZ=Asia/Shanghai" \
+  --set "chaosDaemon.runtime=containerd" \
+  --set "chaosDaemon.socketPath=/run/containerd/containerd.sock" \
+  --set "controller.resources.requests.memory=512Mi" \
+  --set "controller.resources.limits.memory=1024Mi"
 
 # Elasticsearch (注意，必须要开启mnikube的这两个插件，否则无法成功运行elasticsearch)
 minikube addons enable default-storageclass
@@ -96,4 +113,3 @@ helm install istiod ./istiod -n istio-system
 cd prometheus/charts
 helm install prometheus -n istio-system ./prometheus
 cd -
-
