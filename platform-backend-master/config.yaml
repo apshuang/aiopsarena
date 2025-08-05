@@ -3,7 +3,7 @@ host: 172.17.0.2
 user: root
 password: elastic
 port: 3306
-database: wjj
+database: work
 chaosmesh_database: chaos_mesh
 kubernetes_path: '~/.kube/config'
 dataset_dir: 'dataset_collector/dataset'
