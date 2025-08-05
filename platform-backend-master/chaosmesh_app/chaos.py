@@ -46,6 +46,7 @@ def fill_generate_yaml(data):
         'schedule': data.get('schedule', ''),
         'pods': data.get('pods', ''),
         'namespace': root_config['namespace'],
+        'historyLimit': data.get('historyLimit', 1000),
         #如果是network
         'latency': data.get('latency', ''),
         'correlation': int(data.get('correlation', 0)),  # 如果correlation键不存在，默认值为0

@@ -17,6 +17,14 @@ def get_stressor_type(stressors):
     failure_type = list(stressors.keys())[0]
     return failure_type
 
+def get_httpChaos_type(spec):
+    if isinstance(spec, dict):
+        if "delay" in spec:
+            return "delay"
+        elif "abort" in spec:
+            return "abort"
+    return None
+
 def get_service_for_pod(cmdb_id_list):
     service_list = [cmdb_id.split('-')[0] for cmdb_id in cmdb_id_list]
     return service_list
@@ -146,6 +154,10 @@ class ChaosMeshAPI:
             culprit_cmdb_id_list = self.get_culprit_cmdb_id(cmdb_id_list, selector)
         elif kind == 'StressChaos':
             failure_type = get_stressor_type(experiment['stressors'])
+            selector = experiment['selector']
+            culprit_cmdb_id_list = self.get_culprit_cmdb_id(cmdb_id_list, selector)
+        elif kind == 'HTTPChaos':
+            failure_type = get_httpChaos_type(experiment)
             selector = experiment['selector']
             culprit_cmdb_id_list = self.get_culprit_cmdb_id(cmdb_id_list, selector)
 

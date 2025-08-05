@@ -119,7 +119,7 @@ export default {
             const end = new Date()
             const start = new Date()
             start.setTime(start.getTime() - 1000 * 60 * 1)
-            picker.$emit('pick', [start, end])
+            picker.$emit('pick', start)
           }
         }, {
           text: this.$t('dataMonitor.fiveMinute'),
@@ -127,7 +127,7 @@ export default {
             const end = new Date()
             const start = new Date()
             start.setTime(start.getTime() - 1000 * 60 * 5)
-            picker.$emit('pick', [start, end])
+            picker.$emit('pick', start)
           }
         }, {
           text: this.$t('dataMonitor.fifteenMinute'),
@@ -135,7 +135,7 @@ export default {
             const end = new Date()
             const start = new Date()
             start.setTime(start.getTime() - 1000 * 60 * 15)
-            picker.$emit('pick', [start, end])
+            picker.$emit('pick', start)
           }
         }]
       }
@@ -178,19 +178,21 @@ export default {
       this.$emit('hideCard', this.name)
     },
     receiveTime(time) {
-      // 接收时间
-      if (this.timeListIndex === time.timeListIndex && this.datetime === time.datetime) return
+      if (this.timeListIndex === time.timeListIndex && this.datetime.getTime() === new Date(time.datetime).getTime()) return
       this.timeListIndex = time.timeListIndex
-      this.datetime = time.datetime
+      this.datetime = new Date(time.datetime)
       this.searchData()
     },
     getDuration() {
-      return [this.datetime.getTime() - this.timeList[this.timeListIndex][1], this.datetime.getTime()]
+      const endTime = this.datetime.getTime()
+      const duration = this.timeList[this.timeListIndex][1]
+      return [endTime - duration, endTime]
     },
     searchData() {
-      const duration = this.timeList[this.timeListIndex][1]
-      const startTime = this.datetime.getTime() - duration
-      const endTime = this.datetime.getTime()
+      if (!(this.datetime instanceof Date)) {
+        this.datetime = new Date(this.datetime)
+      }
+      const [startTime, endTime] = this.getDuration()
       getMetric({
         pod: this.pod,
         metric_name: this.name,
@@ -212,8 +214,6 @@ export default {
     draw() {
       if (!this.$refs.chart) return
       const chart = this.chart || echarts.init(this.$refs.chart)
-      // const dataZoomStart = chart._model ? chart._model.option.dataZoom[0].start : 0
-      // const dataZoomEnd = chart._model ? chart._model.option.dataZoom[0].end : 100
       const option = {
         title: {
           text: this.title,

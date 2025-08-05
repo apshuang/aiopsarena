@@ -27,5 +27,5 @@ spec:
           app: {targetapp}
         pods:
           default:
-            - {targetpods}
+            {targetpods}
       mode: all

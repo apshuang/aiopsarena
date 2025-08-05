@@ -44,7 +44,7 @@ class LoginView(View):
                     )  # 用户名和密码验证成功, 生成token
                     return ApiResponse.success(data={"token": token.decode("utf-8"),
                                                      "username": username,
-                                                    'email': User.email})
+                                                    'email': user.email})
                 else:
                     return ApiResponse.error('Wrong Password!')  # 密码验证失败
             except Exception as e:
@@ -77,7 +77,7 @@ class LoginView(View):
                     )  # 用户名和密码验证成功, 生成token
                     return ApiResponse.success(data={"token": token.decode("utf-8"),
                                                      "username": user.username,
-                                                     'email': User.email})
+                                                     'email': user.email})
                 else:
                     return ApiResponse.error('Wrong Password!')  # 密码验证失败
             except Exception as e:
