@@ -112,36 +112,93 @@ class FaultDataGenerator:
             return self.generate_stress_fault()
         else:
             return self.generate_http_fault()
+        
+        
+# -------------------- 模块3：token维护器 --------------------
+class TokenManager:
+    def __init__(self, base_url, username, password):
+        self.login_url = f"{base_url.rstrip('/')}/loginByUsername"
+        self.username = username
+        self.password = password
+        self.token = None
 
+    def get_token(self):
+        if not self.token:
+            self._fetch_token()
+        return self.token
 
-# -------------------- 模块3：注入器 --------------------
-class FaultInjector:
-    def __init__(self, url: str, token: str = "", cookie: str = ""):
-        self.url = url
-        self.session = requests.Session()
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        if token:
-            headers["Authorization"] = f"token {token}"
-        if cookie:
-            headers["Cookie"] = cookie
-        self.session.headers.update(headers)
+    def force_refresh(self):
+        """强制刷新 Token"""
+        self.token = None
+        self._fetch_token()
 
-    def inject(self, data: dict):
+    def _fetch_token(self):
         try:
+            resp = requests.post(
+                self.login_url,
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({
+                    "username": self.username,
+                    "password": self.password
+                })
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") == 0:
+                self.token = data["data"]["token"]
+                logger.info("✅ Token fetched successfully.")
+            else:
+                raise Exception(f"Login failed: {data.get('message')}")
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch token: {e}")
+            raise
+
+
+# -------------------- 模块4：注入器 --------------------
+class FaultInjector:
+    def __init__(self, base_url: str, token_manager: TokenManager, cookie: str = ""):
+        self.inject_url = f"{base_url.rstrip('/')}/chaosmesh/inject"
+        self.token_manager = token_manager
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        })
+        if cookie:
+            self.session.headers.update({"Cookie": cookie})
+
+    def inject(self, data: dict, retry_on_auth_error=True):
+        try:
+            # 每次注入前都使用最新 token
+            token = self.token_manager.get_token()
+            self.session.headers.update({"Authorization": f"token {token}"})
+
             logger.info(f"Injecting fault: {data['name']}")
-            response = self.session.post(self.url, json={'data': data})
+            response = self.session.post(self.inject_url, json={"data": data})
+
             if response.status_code == 200:
                 logger.info(f"✅ Injection succeeded: {response.json()}")
+                return True
             else:
-                logger.error(f"❌ Injection failed: {response.status_code} - {response.text}")
+                # 检测 token 过期/认证失败
+                if retry_on_auth_error and (
+                    response.status_code == 401
+                    or "Token" in response.text
+                    or "authenticate" in response.text
+                ):
+                    logger.warning("⚠️ Token might be expired. Refreshing and retrying...")
+                    self.token_manager.force_refresh()
+                    return self.inject(data, retry_on_auth_error=False)
+                else:
+                    logger.error(f"❌ Injection failed: {response.status_code} - {response.text}")
+                    return False
+
         except Exception as e:
             logger.exception(f"🚨 Exception during injection: {e}")
+            return False
 
 
-# -------------------- 可选：调度器 --------------------
+# -------------------- 模块5：调度器 --------------------
 STATE_FILE = "fault_state.json"
 
 class Scheduler:
@@ -218,22 +275,26 @@ class Scheduler:
                 time.sleep(15)
 
 
+
+
 # -------------------- 主程序入口 --------------------
 if __name__ == "__main__":
-    INJECT_FAULT_URL = "http://localhost:9988/api/chaosmesh/inject"
+    BASE_API_URL = "http://localhost:9988/api"
 
-    TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3NTQ1Mzc2OTUsImlhdCI6MTc1NDQ1MTI5NSwiZGF0YSI6eyJpZCI6MX19.nd4GeFyLhU4z2Y6sM4XXDBhxasetpxqICCCba9KbWqI"
     COOKIE = "R_PCS=light; R_LOCALE=en-us; R_USERNAME=admin"
+    USERNAME = "strangepro"
+    PASSWORD = "password1"
+    
+    token_manager = TokenManager(BASE_API_URL, USERNAME, PASSWORD)
 
     generator = FaultDataGenerator()
-    injector = FaultInjector(INJECT_FAULT_URL, TOKEN, COOKIE)
+    injector = FaultInjector(BASE_API_URL, token_manager, COOKIE)
 
     # 单次注入
     # fault_data = generator.generate_random_fault()
     # injector.inject(fault_data)
     
+    # 循环注入
     scheduler = Scheduler(injector, generator)
     scheduler.run()
 
-    # 如果想循环运行注入器，取消注释：
-    # run_scheduler(injector, generator, interval=120)
