@@ -7,3 +7,8 @@
 /platform-backend-master/chaosmesh_app/injection
 *.log
 fault_state.json
+multi_modal_data
+log_state.json
+metric_state.json
+trace_state.json
+temp.py

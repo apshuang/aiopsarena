@@ -237,6 +237,13 @@ class Scheduler:
         while True:
             try:
                 now = datetime.now(timezone.utc)
+                
+                # 在北京时间0点到1点的时候不注入故障，以形成一个normal的数据
+                if 16 <= now.hour < 17:
+                    logger.info("⏸ 北京时间 0~1 点，跳过故障注入窗口")
+                    time.sleep(60)  # 休眠 1 分钟再检查
+                    continue
+                
                 window_start = self.get_current_window_start(now)
                 window_key = window_start.strftime("%Y%m%d%H%M")
                 
