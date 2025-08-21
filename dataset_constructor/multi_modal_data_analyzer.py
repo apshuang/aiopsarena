@@ -9,8 +9,10 @@ from datetime import datetime, timedelta, time, timezone
 from typing import Protocol
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from collections import defaultdict
 import pandas as pd
 
+AGGREGATE_MODE = True
 
 # =============================
 # 异常检测器接口（传时间范围，不直接给 query_df）
@@ -75,6 +77,48 @@ class SASDetector:
         self.min_duration_minutes = min_duration_minutes
         self.direction = direction
         self.resample_rule = resample_rule
+        
+    def normalize_cmdb_id(self, cmdb_id: str) -> str:
+        # 去掉副本号
+        base = cmdb_id.rsplit("-", 1)[0]
+        # 去掉 minikube. 前缀
+        if base.startswith("minikube."):
+            base = base.split("minikube.", 1)[1]
+        return base
+    
+    def to_datetime(self, val):
+        if isinstance(val, datetime):
+            return val
+        return datetime.fromisoformat(val)
+
+    def aggregate_metric_anomalies(self, anomalies: list[dict]) -> list[dict]:
+        """
+        聚合同一 service/pattern/metric 的 metric 异常
+        """
+        groups = defaultdict(list)
+
+        for anomaly in anomalies:
+            cmdb_id = self.normalize_cmdb_id(anomaly["cmdb_id"])
+            key = (cmdb_id, anomaly["pattern"], anomaly["metric_name"])
+            groups[key].append(anomaly)
+
+        results = []
+        for (cmdb_id, pattern, metric_name), group in groups.items():
+            start_times = [self.to_datetime(a["start"]) for a in group]
+            end_times   = [self.to_datetime(a["end"]) for a in group]
+            scores      = [a["anomaly_score"] for a in group]
+
+            aggregated = {
+                "cmdb_id": cmdb_id,
+                "pattern": pattern,
+                "metric_name": metric_name,
+                "start": min(start_times).isoformat(),
+                "end": max(end_times).isoformat(),
+                "anomaly_score": max(scores)
+            }
+            results.append(aggregated)
+
+        return results
 
     def detect(
         self,
@@ -128,7 +172,7 @@ class SASDetector:
             if duration_min >= self.min_duration_minutes:
                 results.append({
                     "cmdb_id": cmdb_id,
-                    "pattern": "SAS",
+                    "pattern": "Static-Anomaly-Static",
                     "metric_name": metric_name,
                     # "metric_data": seg.copy(),
                     "start": seg["timestamp"].iloc[0],
@@ -136,68 +180,10 @@ class SASDetector:
                     "thresholds": {"up": up_th, "down": dn_th, "mean": mean, "std": float(std)},
                     "anomaly_score": abs((seg["value"].mean() - mean) / std)  # 这一段的z-score平均值
                 })
-
-        return results
-
-
-# =============================
-# 滑动窗口 Z-score 检测器
-# =============================
-class SlidingZScoreDetector:
-    def __init__(self, window_size: int = 30, z_threshold: float = 3.0, resample_rule: str | None = "1min"):
-        self.window_size = window_size
-        self.z_threshold = z_threshold
-        self.resample_rule = resample_rule
-
-    def detect(
-        self,
-        full_df: pd.DataFrame,
-        cmdb_id: str,
-        metric_name: str,
-        baseline_df: pd.DataFrame,  # 这里不直接用 baseline，但保留接口兼容性
-        start_time: datetime,
-        end_time: datetime
-    ) -> list[dict]:
-        query_df = _resample(
-            full_df[(full_df["timestamp"] >= start_time) & (full_df["timestamp"] <= end_time)],
-            self.resample_rule
-        ).sort_values("timestamp")
-
-        results: list[dict] = []
-        if query_df.empty or len(query_df) <= self.window_size:
+        if AGGREGATE_MODE:
+            return self.aggregate_metric_anomalies(results)
+        else:
             return results
-
-        query_df["is_anomaly"] = False
-        for i in range(self.window_size, len(query_df)):
-            window = query_df.iloc[i - self.window_size : i]["value"]
-            mean = window.mean()
-            std = window.std(ddof=0) if len(window) > 1 else 1e-9
-            std = max(std, 1e-3)
-            z = (query_df.iloc[i]["value"] - mean) / std
-            if abs(z) > self.z_threshold:
-                query_df.at[query_df.index[i], "is_anomaly"] = True
-
-        if not query_df["is_anomaly"].any():
-            return results
-
-        grp_id = (query_df["is_anomaly"].ne(query_df["is_anomaly"].shift())).cumsum()
-        query_df["grp"] = grp_id
-
-        for _, seg in query_df.groupby("grp"):
-            if not seg["is_anomaly"].iloc[0]:
-                continue
-            results.append({
-                "cmdb_id": cmdb_id,
-                "pattern": "ZScore",
-                "metric_name": metric_name,
-                "metric_data": seg.copy(),
-                "start": seg["timestamp"].iloc[0],
-                "end": seg["timestamp"].iloc[-1],
-                "z_threshold": self.z_threshold,
-                "window_size": self.window_size
-            })
-
-        return results
 
 
 # =============================
@@ -483,8 +469,20 @@ class LogAnalyzer:
         # 转到北京时间
         df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")      # 告诉 pandas 这是 UTC
         df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Shanghai")  # 转到北京时间
+
+        # 删除缺失值
         df = df.dropna(subset=["timestamp", "cmdb_id", "message"])
         df = df.sort_values("timestamp")
+
+        # 归一化 cmdb_id：去掉 pod 层级，只保留 service
+        def normalize_cmdb_id(cmdb_id: str) -> str:
+            if not isinstance(cmdb_id, str):
+                return cmdb_id
+            return cmdb_id.rsplit("-", 1)[0]
+
+        if AGGREGATE_MODE:
+            df["cmdb_id"] = df["cmdb_id"].apply(normalize_cmdb_id)
+
         self.loaded_log[cache_key] = df
         return df
 
@@ -627,10 +625,38 @@ class TraceErrorRateDetector:
             })
         return results
 
-# =========================================
-# 拓扑模式检测器（基础版）
-# =========================================
+
+
 class TraceTopologyChangeDetector:
+    def _build_chains(self, df: pd.DataFrame) -> set[tuple]:
+        """
+        遍历 trace_df 构建调用链集合
+        假设 df 至少包含以下列: trace_id, span_id, parent_span_id, service, operation, start_time
+        """
+        chains = set()
+
+        # 按 trace_id 分组，避免不同 trace 混淆
+        for trace_id, group in df.groupby("trace_id"):
+            span_map = {row["span_id"]: row for _, row in group.iterrows()}
+
+            for span_id, span_data in span_map.items():
+                chain = []
+                current_id = span_id
+
+                while current_id in span_map:
+                    node = span_map[current_id]
+                    chain.append(f"{node['cmdb_id']}:{node['operation_name']}")
+                    parent_id = node.get("parent_span")
+                    if pd.isna(parent_id):
+                        break
+                    current_id = parent_id
+
+                # 反转链路，保证从根到叶
+                chain = tuple(reversed(chain))
+                chains.add(chain)
+
+        return chains
+
     def detect(
         self,
         trace_df: pd.DataFrame,
@@ -638,34 +664,36 @@ class TraceTopologyChangeDetector:
         start_time: datetime,
         end_time: datetime
     ) -> list[dict]:
-        results: list[dict] = []
-        if trace_df.empty:
-            return results
+        # 基线调用链集合
+        baseline_chains = self._build_chains(baseline_df)
 
-        base_edges = set()
-        for _, r in baseline_df.iterrows():
-            if pd.notna(r["parent_span"]):
-                base_edges.add((r["parent_span"], r["operation_name"]))
+        # 过滤 query 时间范围内的数据
+        query_df = trace_df[
+            (trace_df["timestamp"] >= start_time) &
+            (trace_df["timestamp"] <= end_time)
+        ]
+        query_chains = self._build_chains(query_df)
 
-        q = trace_df[(trace_df["timestamp"] >= start_time) & (trace_df["timestamp"] <= end_time)]
-        if q.empty:
-            return results
+        anomalies = []
 
-        new_edges = set()
-        for _, r in q.iterrows():
-            if pd.notna(r["parent_span"]):
-                edge = (r["parent_span"], r["operation_name"])
-                if edge not in base_edges:
-                    new_edges.add(edge)
-
-        if new_edges:
-            results.append({
-                "pattern": "TraceTopologyNewEdge",
-                "edges": list(new_edges),
-                "start": q["timestamp"].min(),
-                "end": q["timestamp"].max()
+        # 断链: baseline 有但 query 没有
+        missing_chains = baseline_chains - query_chains
+        for chain in missing_chains:
+            anomalies.append({
+                "type": "missing_chain",
+                "chain": chain
             })
-        return results
+
+        # 新链: query 有但 baseline 没有
+        new_chains = query_chains - baseline_chains
+        for chain in new_chains:
+            anomalies.append({
+                "type": "new_chain",
+                "chain": chain
+            })
+
+        return anomalies
+
 
 # =========================================
 # Trace Analyzer
@@ -822,11 +850,11 @@ class GroundTruthExtractor:
 
 if __name__ == "__main__":
     data_root_path = Path("./multi_modal_data")
+    output_folder = Path("./case")
     
     metric_analyzer = MetricAnalyzer()
     
     metric_analyzer.register_detector(SASDetector(n_sigma=3, min_duration_minutes=5))
-    metric_analyzer.register_detector(SlidingZScoreDetector(window_size=30, z_threshold=3.0))
     
     log_analyzer = LogAnalyzer(data_root_path)
     log_analyzer.register_detector(
@@ -841,7 +869,7 @@ if __name__ == "__main__":
     trace_analyzer = TraceAnalyzer(data_root_path)
     trace_analyzer.register_detector(TraceLatencyDetector())
     trace_analyzer.register_detector(TraceErrorRateDetector())
-    # trace_analyzer.register_detector(TraceTopologyChangeDetector())
+    trace_analyzer.register_detector(TraceTopologyChangeDetector())
     
     ground_truth_extractor = GroundTruthExtractor(
         host="172.17.0.2",
@@ -875,13 +903,9 @@ if __name__ == "__main__":
         "ground_truth": ground_truth
     }
     
-    output_file = Path(f"case_{start.strftime('%Y%m%d_%H-%M-%S')}.json")
+    output_file = output_folder / (f"case_{start.strftime('%Y%m%d_%H-%M-%S')}.json")
+    
     with output_file.open("w", encoding="utf-8") as f:
         json.dump(case, f, ensure_ascii=False, indent=4)
-
-    # print(metric_anomalies)
-    # for a in metric_anomalies:
-        # print(a)
-        # print(a["cmdb_id"], a["pattern"], a["metric_name"], a["start"], "->", a["end"], a["thresholds"])
-        
+  
     ground_truth_extractor.close_connection()
