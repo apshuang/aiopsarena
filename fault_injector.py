@@ -64,11 +64,11 @@ class FaultDataGenerator:
         month = schedule_time_utc.month
         return f"{minute} {hour} {day} {month} *"
     
-
     def get_pods(self, app):
         return [f"{app}-{i}" for i in range(3)]
 
-    def generate_stress_fault(self):
+    def generate_cpu_stress_fault(self):
+        """生成CPU类型的stress故障"""
         app = random.choice(self.apps)
         duration = f"{random.randint(2, 7)}m"
         name = self.get_timestamp_name()
@@ -85,7 +85,28 @@ class FaultDataGenerator:
             "workers": random.randint(2, 6),
             "load": random.randint(80, 100)
         }
-        logger.info(f"Generated StressChaos: {json.dumps(data)}")
+        logger.info(f"Generated CPU StressChaos: {json.dumps(data)}")
+        return data
+
+    def generate_memory_stress_fault(self):
+        """生成Memory类型的stress故障"""
+        app = random.choice(self.apps)
+        duration = f"{random.randint(2, 7)}m"
+        name = self.get_timestamp_name()
+        data = {
+            "name": name,
+            "app": app,
+            "duration": duration,
+            "schedule": self.generate_schedule_time(),
+            "historyLimit": "1000",
+            "pods": self.get_pods(app),
+            "selected_template": "memory",
+            "inject_type": "experiment",
+            "fault_type": "stress",
+            "workers": random.randint(2, 6),
+            "size": f"{random.randint(80, 100)}%"
+        }
+        logger.info(f"Generated Memory StressChaos: {json.dumps(data)}")
         return data
 
     def generate_http_fault(self):
@@ -108,9 +129,15 @@ class FaultDataGenerator:
         return data
 
     def generate_random_fault(self):
-        if random.choice(["stress", "http"]) == "stress":
-            return self.generate_stress_fault()
-        else:
+        # 确保三种故障的概率相等：CPU stress、Memory stress、HTTP
+        # 使用1-3的随机数，每个数字对应一种故障类型
+        fault_choice = random.randint(1, 3)
+        
+        if fault_choice == 1:
+            return self.generate_cpu_stress_fault()
+        elif fault_choice == 2:
+            return self.generate_memory_stress_fault()
+        else:  # fault_choice == 3
             return self.generate_http_fault()
         
         

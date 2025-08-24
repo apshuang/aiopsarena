@@ -760,6 +760,86 @@ def serialize(anomaly):
     return a
 
 
+def generate_batch_cases(
+    start_time: datetime,
+    end_time: datetime,
+    metric_analyzer: MetricAnalyzer,
+    log_analyzer: LogAnalyzer,
+    trace_analyzer: TraceAnalyzer,
+    ground_truth_extractor: GroundTruthExtractor,
+    data_root_path: Path,
+    output_folder: Path,
+    time_window_minutes: int = 30
+):
+    """
+    批量生成case，按指定时间窗口划分
+    
+    Args:
+        start_time: 开始时间（带时区）
+        end_time: 结束时间（带时区）
+        metric_analyzer: 指标分析器
+        log_analyzer: 日志分析器
+        trace_analyzer: 链路分析器
+        ground_truth_extractor: 真实标签提取器
+        data_root_path: 数据根路径
+        output_folder: 输出文件夹
+        time_window_minutes: 时间窗口大小（分钟），默认30分钟
+    """
+    # 确保时区一致
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    
+    # 生成时间窗口列表
+    time_windows = []
+    current_time = start_time
+    while current_time < end_time:
+        window_end = min(current_time + timedelta(minutes=time_window_minutes), end_time)
+        time_windows.append((current_time, window_end))
+        current_time = window_end
+    
+    print(f"将生成 {len(time_windows)} 个case，时间窗口: {time_window_minutes}分钟")
+    
+    # 为每个时间窗口生成case
+    for i, (window_start, window_end) in enumerate(time_windows):
+        print(f"正在处理第 {i+1}/{len(time_windows)} 个时间窗口: {window_start.strftime('%Y-%m-%d %H:%M:%S')} ~ {window_end.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # 获取日期字符串用于数据加载
+        date = window_start.strftime("%Y-%m-%d")
+        
+        # 加载对应日期的数据
+        metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container")
+        trace_analyzer.load_traces_from_folder(data_root_path / date / "trace")
+        
+        # 查询异常信息
+        metric_anomalies = metric_analyzer.query_anomalies(window_start, window_end)
+        log_anomalies = log_analyzer.query_anomalies(window_start, window_end)
+        trace_anomalies = trace_analyzer.query_anomalies(window_start, window_end)
+        
+        anomaly_information = metric_anomalies + log_anomalies + trace_anomalies
+        
+        # 查询真实标签
+        ground_truth = ground_truth_extractor.query_injection(window_start, window_end)
+        
+        # 生成case
+        time_range_str = f"{window_start.isoformat()} ~ {window_end.isoformat()}"
+        
+        case = {
+            "fault_time_window": time_range_str,
+            "anomaly_information": [serialize(a) for a in anomaly_information],
+            "ground_truth": ground_truth
+        }
+        
+        # 保存case文件
+        output_file = output_folder / (f"case_{window_start.strftime('%Y%m%d_%H-%M-%S')}.json")
+        
+        with output_file.open("w", encoding="utf-8") as f:
+            json.dump(case, f, ensure_ascii=False, indent=4)
+        
+        print(f"已生成: {output_file.name}")
+
+
 class GroundTruthExtractor:
     def __init__(self, host: str, port: int, user: str, password: str, database: str):
         self.conn = pymysql.connect(
@@ -818,11 +898,18 @@ class GroundTruthExtractor:
 
         results = []
         for row in rows:
+            inject_type = row.get("kind")
             experiment_dict = json.loads(row["experiment"])
             metadata_dict = json.loads(list(experiment_dict["metadata"]["annotations"].values())[0])
             spec_dict = dict(metadata_dict["spec"])
             
-            stressor = list(spec_dict["stressors"].keys())[0]
+            if inject_type == "StressChaos":
+                inject_sub_type = list(spec_dict["stressors"].keys())[0]
+            elif inject_type == "HTTPChaos":
+                inject_sub_type = list(spec_dict.keys())[0]
+            else:
+                raise ValueError(f"未知注入类型: {inject_type}")
+            
             duration_str = spec_dict["duration"]
             duration_sec = self.parse_duration_str(duration_str)
             
@@ -836,7 +923,7 @@ class GroundTruthExtractor:
             results.append({
                 "inject_time": inject_time,
                 "recover_time": recover_time,
-                "inject_type": f'{row.get("kind")}-{stressor}',
+                "inject_type": f'{inject_type}-{inject_sub_type}',
                 "inject_component": spec_dict["selector"]["labelSelectors"]["app"]
             })
 
@@ -879,33 +966,22 @@ if __name__ == "__main__":
         database="chaos_mesh"
     )
     
+    # 设置时间范围（每半小时一个故障注入）
     tz = "Asia/Shanghai"
     start = pd.Timestamp(datetime(2025, 8, 19, 1, 0, 0), tz=tz)
-    end   = pd.Timestamp(datetime(2025, 8, 19, 1, 29, 59), tz=tz)
+    end   = pd.Timestamp(datetime(2025, 8, 19, 5, 59, 59), tz=tz)
     
-    date = start.strftime("%Y-%m-%d")
-    
-    metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container")
-    trace_analyzer.load_traces_from_folder(data_root_path / date / "trace")
-    metric_anomalies = metric_analyzer.query_anomalies(start, end)
-    log_anomalies = log_analyzer.query_anomalies(start, end)
-    trace_anomalies = trace_analyzer.query_anomalies(start, end)
-    
-    anomaly_information = metric_anomalies + log_anomalies + trace_anomalies
-
-    ground_truth = ground_truth_extractor.query_injection(start, end)
-    
-    time_range_str = f"{start.isoformat()} ~ {end.isoformat()}"
-    
-    case = {
-        "fault_time_window": time_range_str,
-        "anomaly_information": [serialize(a) for a in anomaly_information],
-        "ground_truth": ground_truth
-    }
-    
-    output_file = output_folder / (f"case_{start.strftime('%Y%m%d_%H-%M-%S')}.json")
-    
-    with output_file.open("w", encoding="utf-8") as f:
-        json.dump(case, f, ensure_ascii=False, indent=4)
+    # 使用批量化处理函数生成多个case
+    generate_batch_cases(
+        start_time=start.to_pydatetime(),
+        end_time=end.to_pydatetime(),
+        metric_analyzer=metric_analyzer,
+        log_analyzer=log_analyzer,
+        trace_analyzer=trace_analyzer,
+        ground_truth_extractor=ground_truth_extractor,
+        data_root_path=data_root_path,
+        output_folder=output_folder,
+        time_window_minutes=30  # 30分钟时间窗口
+    )
   
     ground_truth_extractor.close_connection()
