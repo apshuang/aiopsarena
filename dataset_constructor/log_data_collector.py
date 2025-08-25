@@ -349,7 +349,7 @@ async def extract_full_day(
     start_dt_local = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=tz)
     start_dt_utc = start_dt_local.astimezone(timezone.utc)
 
-    for h in range(6):
+    for h in range(24):
         hour_dt = start_dt_utc + timedelta(hours=h)
         await maintainer.extract_for_hour(hour_dt)
 

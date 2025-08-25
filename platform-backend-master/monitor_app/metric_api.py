@@ -33,7 +33,7 @@ normal_metrics = [
     "container_spec_cpu_shares",
     # threads
     "container_threads",
-    "container_threads_max"
+    "container_threads_max",
     # network
     "container_network_receive_errors_total",
     "container_network_receive_packets_dropped_total",

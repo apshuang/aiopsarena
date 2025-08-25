@@ -10,7 +10,6 @@ from prometheus_api_client import PrometheusConnect
 
 
 normal_metrics = [
-    # author psy7604
     # 根据筛选的指标构建需要的指标集合
     # cpu
     "container_cpu_usage_seconds_total",
@@ -33,7 +32,12 @@ normal_metrics = [
     "container_spec_cpu_shares",
     # threads
     "container_threads",
-    "container_threads_max"
+    "container_threads_max",
+    # filesystem
+    "container_fs_reads_total",
+    "container_fs_writes_total",
+    "container_fs_reads_bytes_total",
+    "container_fs_writes_bytes_total",
     # network
     "container_network_receive_errors_total",
     "container_network_receive_packets_dropped_total",
@@ -57,6 +61,18 @@ istio_metrics = [
     "istio_tcp_connections_opened_total",
     "istio_tcp_connections_closed_total"
 ]
+filesystem_metrics = [
+    # filesystem
+    "container_fs_reads_total",
+    "container_fs_writes_total",
+    "container_fs_reads_bytes_total",
+    "container_fs_writes_bytes_total",
+    "container_fs_read_seconds_total",
+    "container_fs_write_seconds_total",
+    "container_fs_io_time_seconds_total",
+    "container_fs_io_time_weighted_seconds_total"
+]
+
 network_metrics = [
     # network
     "container_network_receive_errors_total",
@@ -173,12 +189,20 @@ class MetricDataExtractor:
             for metric in normal_metrics:
                 if "total" in metric:
                     # 对于累积型指标，提取出原本的情况
-                    data_raw = self.client.custom_query_range(
-                        f"rate({metric}{{namespace='{namespace}', container!='', image!~'.*pause.*'}}[1m])",
+                    if metric in network_metrics:
+                        data_raw = self.client.custom_query_range(
+                        f"rate({metric}{{namespace='{namespace}'}}[3m])",
                         self.time_format_transform(start_time),
                         self.time_format_transform(current_et),
                         step=str(step)
                     )
+                    else:
+                        data_raw = self.client.custom_query_range(
+                            f"rate({metric}{{namespace='{namespace}', container!='', image!~'.*pause.*'}}[3m])",
+                            self.time_format_transform(start_time),
+                            self.time_format_transform(current_et),
+                            step=str(step)
+                        )
                     metric = metric.strip("_total")
                     
                 else:
@@ -368,7 +392,7 @@ async def extract_full_day(
     start_dt_local = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=tz)
     start_dt_utc = start_dt_local.astimezone(timezone.utc)
 
-    for h in range(6):
+    for h in range(24):
         hour_dt = start_dt_utc + timedelta(hours=h)
         await maintainer.extract_for_hour(hour_dt)
 
