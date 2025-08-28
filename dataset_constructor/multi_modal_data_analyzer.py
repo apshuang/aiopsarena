@@ -253,7 +253,8 @@ class LogAnomalyDetector(Protocol):
         self,
         log_df: pd.DataFrame,
         start_time: datetime,
-        end_time: datetime
+        end_time: datetime,
+        baseline_df: pd.DataFrame
     ) -> list[dict]:
         ...
 
@@ -289,7 +290,8 @@ class KeywordAndCodeDetector:
         self,
         log_df: pd.DataFrame,
         start_time: datetime,
-        end_time: datetime
+        end_time: datetime,
+        baseline_df: pd.DataFrame
     ) -> list[dict]:
         results: list[dict] = []
         if log_df.empty:
@@ -335,9 +337,19 @@ class KeywordAndCodeDetector:
                 df["matched_codes"] = [[] for _ in range(len(df))]
         else:
             if self.error_codes:
-                df["matched_codes"] = df[text_col].apply(
-                    lambda s: [c for c in self.error_codes if c in str(s)]
-                )
+                # 使用正则表达式精确匹配错误码，避免误判
+                def match_error_codes(text: str) -> list[str]:
+                    matched_codes = []
+                    text_str = str(text)
+                    for code in self.error_codes:
+                        # 使用正则表达式匹配，确保错误码是独立的数字
+                        # 匹配模式：错误码前后不能是数字，但可以是空格、标点符号等
+                        pattern = r'(?<!\d)' + re.escape(code) + r'(?!\d)'
+                        if re.search(pattern, text_str):
+                            matched_codes.append(code)
+                    return matched_codes
+                
+                df["matched_codes"] = df[text_col].apply(match_error_codes)
             else:
                 df["matched_codes"] = [[] for _ in range(len(df))]
 
@@ -420,17 +432,109 @@ class KeywordAndCodeDetector:
 
 
 # =========================================
+# 日志量异常检测器
+# =========================================
+class LogVolumeAnomalyDetector:
+    """
+    检测日志量异常：基于基线数据，检测某个服务的日志量是否明显减少或增多
+    """
+    def __init__(
+        self,
+        volume_threshold: float = 0.5,  # 日志量变化阈值（50%）
+        min_baseline_count: int = 10    # 基线数据最小日志数量
+    ):
+        self.volume_threshold = volume_threshold
+        self.min_baseline_count = min_baseline_count
+
+    def detect(
+        self,
+        log_df: pd.DataFrame,
+        start_time: datetime,
+        end_time: datetime,
+        baseline_df: pd.DataFrame
+    ) -> list[dict]:
+        results: list[dict] = []
+        
+        if log_df.empty or baseline_df.empty:
+            return results
+
+        # 必须有 cmdb_id
+        if "cmdb_id" not in log_df.columns or "cmdb_id" not in baseline_df.columns:
+            return results
+
+        # 时间过滤
+        current_df = log_df.loc[(log_df["timestamp"] >= start_time) & (log_df["timestamp"] <= end_time)].copy()
+        if current_df.empty:
+            return results
+
+        # 按 cmdb_id 分组检测
+        for cmdb_id, current_group in current_df.groupby("cmdb_id"):
+            baseline_group = baseline_df[baseline_df["cmdb_id"] == cmdb_id]
+            if baseline_group.empty:
+                continue
+
+            # 重采样并计算日志量
+            current_volume = self._calculate_log_volume(pd.DataFrame(current_group), start_time, end_time)
+            baseline_volume = self._calculate_log_volume(pd.DataFrame(baseline_group), start_time, end_time)
+
+            if baseline_volume < self.min_baseline_count:
+                continue
+
+            # 计算变化率
+            if baseline_volume > 0:
+                change_ratio = (current_volume - baseline_volume) / baseline_volume
+                
+                # 检测异常
+                if abs(change_ratio) >= self.volume_threshold:
+                    anomaly_type = "LogVolumeIncrease" if change_ratio > 0 else "LogVolumeDecrease"
+                    
+                    results.append({
+                        "cmdb_id": cmdb_id,
+                        "pattern": anomaly_type,
+                        "change_ratio": f"{change_ratio:.2%}",
+                        "start": start_time,
+                        "end": end_time
+                    })
+
+        return results
+
+    def _calculate_log_volume(self, df: pd.DataFrame, start_time: datetime, end_time: datetime) -> float:
+        """计算指定时间窗口内的日志量"""
+        if df.empty:
+            return 0.0
+        
+        # 时间过滤
+        time_filtered = df.loc[(df["timestamp"] >= start_time) & (df["timestamp"] <= end_time)]
+        if time_filtered.empty:
+            return 0.0
+        
+        # 直接计算总数，不需要重采样
+        return float(len(time_filtered))
+
+
+# =========================================
 # 日志数据管理类
 # =========================================
 class LogAnalyzer:
-    def __init__(self, log_root: Path):
+    def __init__(
+        self, 
+        log_root: Path,
+        baseline_start_tod: time = time(0, 15, 0),  # 00:15
+        baseline_duration: timedelta = timedelta(minutes=30)  # 30分钟，到00:45
+    ):
         self.log_root = log_root
+        self.baseline_start_tod = baseline_start_tod
+        self.baseline_duration = baseline_duration
         self.detectors: list[LogAnomalyDetector] = []
         self.loaded_log: dict[str, pd.DataFrame] = {}  # key: hour_key -> df
         self.max_cache_hours = 1  # 最多缓存几个小时的数据，1表示只缓存当前小时
 
     def _hour_key(self, dt: datetime) -> str:
         return dt.strftime("%Y-%m-%d_%H-00-00")
+
+    def _baseline_df_for(self, df: pd.DataFrame) -> pd.DataFrame:
+        """按每日固定时刻窗口抽取数据作为baseline（不跨天）"""
+        return _ensure_time_window(df, self.baseline_start_tod, self.baseline_duration)
 
     def _load_log_for_time(self, target_time: datetime) -> pd.DataFrame:
         date_str = target_time.strftime("%Y-%m-%d")
@@ -497,9 +601,11 @@ class LogAnalyzer:
         while cur_time <= end_time:
             log_df = self._load_log_for_time(cur_time)
             if not log_df.empty:
+                # 计算当前小时的baseline
+                baseline_df = self._baseline_df_for(log_df)
                 for cmdb_id, g in log_df.groupby("cmdb_id"):
                     for detector in self.detectors:
-                        results.extend(detector.detect(g, start_time, end_time))
+                        results.extend(detector.detect(g, start_time, end_time, baseline_df))
             cur_time += pd.Timedelta(hours=1)
 
         return results
@@ -946,10 +1052,18 @@ if __name__ == "__main__":
     log_analyzer = LogAnalyzer(data_root_path)
     log_analyzer.register_detector(
         KeywordAndCodeDetector(
-            include_keywords=["error", "fail"],
-            exclude_keywords=["test", "ignore", "http://10.99.94.30:8200"],
-            error_codes=["400", "500"],
+            include_keywords=["error", "fail", "warn", "exception", "panic", "fatal"],
+            exclude_keywords=["test", "ignore", "http://10.99.94.30:8200", "elastic-apm-node", "transaction_id"],
+            error_codes=["400", "401", "403", "404", "500", "501", "502", "503", "504"],
             min_count=3
+        )
+    )
+    
+    # 注册日志量异常检测器
+    log_analyzer.register_detector(
+        LogVolumeAnomalyDetector(
+            volume_threshold=0.066,  # 日志量变化6.66%以上视为异常
+            min_baseline_count=100   # 基线数据至少需要100条日志
         )
     )
     
@@ -968,8 +1082,8 @@ if __name__ == "__main__":
     
     # 设置时间范围（每半小时一个故障注入）
     tz = "Asia/Shanghai"
-    start = pd.Timestamp(datetime(2025, 8, 19, 1, 0, 0), tz=tz)
-    end   = pd.Timestamp(datetime(2025, 8, 19, 5, 59, 59), tz=tz)
+    start = pd.Timestamp(datetime(2025, 8, 19, 2, 0, 0), tz=tz)
+    end   = pd.Timestamp(datetime(2025, 8, 19, 3, 59, 59), tz=tz)
     
     # 使用批量化处理函数生成多个case
     generate_batch_cases(
