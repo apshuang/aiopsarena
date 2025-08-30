@@ -91,34 +91,6 @@ class SASDetector:
             return val
         return datetime.fromisoformat(val)
 
-    def aggregate_metric_anomalies(self, anomalies: list[dict]) -> list[dict]:
-        """
-        聚合同一 service/pattern/metric 的 metric 异常
-        """
-        groups = defaultdict(list)
-
-        for anomaly in anomalies:
-            cmdb_id = self.normalize_cmdb_id(anomaly["cmdb_id"])
-            key = (cmdb_id, anomaly["pattern"], anomaly["metric_name"])
-            groups[key].append(anomaly)
-
-        results = []
-        for (cmdb_id, pattern, metric_name), group in groups.items():
-            start_times = [self.to_datetime(a["start"]) for a in group]
-            end_times   = [self.to_datetime(a["end"]) for a in group]
-            scores      = [a["anomaly_score"] for a in group]
-
-            aggregated = {
-                "cmdb_id": cmdb_id,
-                "pattern": "Static-Anomaly-Static",
-                "metric_name": metric_name,
-                "start": min(start_times).isoformat(),
-                "end": max(end_times).isoformat(),
-                "anomaly_score": max(scores)
-            }
-            results.append(aggregated)
-
-        return results
 
     def detect(
         self,
@@ -180,10 +152,7 @@ class SASDetector:
                     "thresholds": {"up": up_th, "down": dn_th, "mean": mean, "std": float(std)},
                     "anomaly_score": abs((seg["value"].mean() - mean) / std)  # 这一段的z-score平均值
                 })
-        if AGGREGATE_MODE:
-            return self.aggregate_metric_anomalies(results)
-        else:
-            return results
+        return results
 
 
 # =============================
@@ -234,37 +203,6 @@ class SpikeDetector:
         if isinstance(val, datetime):
             return val
         return datetime.fromisoformat(val)
-
-    def aggregate_metric_anomalies(self, anomalies: list[dict]) -> list[dict]:
-        """
-        聚合同一 service/pattern/metric 的 spike 异常
-        """
-        groups = defaultdict(list)
-
-        for anomaly in anomalies:
-            cmdb_id = self.normalize_cmdb_id(anomaly["cmdb_id"])
-            key = (cmdb_id, anomaly["pattern"], anomaly["metric_name"])
-            groups[key].append(anomaly)
-
-        results = []
-        for (cmdb_id, pattern, metric_name), group in groups.items():
-            start_times = [self.to_datetime(a["start"]) for a in group]
-            end_times   = [self.to_datetime(a["end"]) for a in group]
-            scores      = [a["anomaly_score"] for a in group]
-            peak_values = [a.get("peak_value", 0) for a in group]
-
-            aggregated = {
-                "cmdb_id": cmdb_id,
-                "pattern": "Spike",
-                "metric_name": metric_name,
-                "start": min(start_times).isoformat(),
-                "end": max(end_times).isoformat(),
-                "anomaly_score": max(scores),
-                # "peak_value": max(peak_values) if peak_values else 0
-            }
-            results.append(aggregated)
-
-        return results
 
     def _detect_spikes_by_threshold(self, query_df: pd.DataFrame, baseline_mean: float, baseline_std: float) -> pd.DataFrame:
         """基于阈值的峰值检测"""
@@ -466,10 +404,7 @@ class SpikeDetector:
                 }
             })
         
-        if AGGREGATE_MODE:
-            return self.aggregate_metric_anomalies(results)
-        else:
-            return results
+        return results
 
 
 # =============================
@@ -520,6 +455,48 @@ class MetricAnalyzer:
 
     def register_detector(self, detector: MetricAnomalyDetector) -> None:
         self.detectors.append(detector)
+        
+    def normalize_cmdb_id(self, cmdb_id: str) -> str:
+        # 去掉副本号
+        base = cmdb_id.rsplit("-", 1)[0]
+        # 去掉 minikube. 前缀
+        if base.startswith("minikube."):
+            base = base.split("minikube.", 1)[1]
+        return base
+    
+    def to_datetime(self, val):
+        if isinstance(val, datetime):
+            return val
+        return datetime.fromisoformat(val)
+        
+    def aggregate_metric_anomalies(self, anomalies: list[dict]) -> list[dict]:
+        """
+        聚合同一 service/pattern/metric 的 metric 异常
+        """
+        groups = defaultdict(list)
+
+        for anomaly in anomalies:
+            cmdb_id = self.normalize_cmdb_id(anomaly["cmdb_id"])
+            key = (cmdb_id, anomaly["pattern"], anomaly["metric_name"])
+            groups[key].append(anomaly)
+
+        results = []
+        for (cmdb_id, pattern, metric_name), group in groups.items():
+            start_times = [self.to_datetime(a["start"]) for a in group]
+            end_times   = [self.to_datetime(a["end"]) for a in group]
+            scores      = [a["anomaly_score"] for a in group]
+
+            aggregated = {
+                "cmdb_id": cmdb_id,
+                "pattern": "Static-Anomaly-Static",
+                "metric_name": metric_name,
+                "start": min(start_times).isoformat(),
+                "end": max(end_times).isoformat(),
+                "anomaly_score": max(scores)
+            }
+            results.append(aggregated)
+
+        return results
 
     def query_anomalies(self, start_time: datetime, end_time: datetime) -> list[dict]:
         results: list[dict] = []
@@ -528,7 +505,10 @@ class MetricAnalyzer:
             baseline_df = self._baseline_df_for(full_df)
             for detector in self.detectors:
                 results.extend(detector.detect(full_df, cmdb_id, metric_name, baseline_df, start_time, end_time))
-        return results
+        if AGGREGATE_MODE:
+            return self.aggregate_metric_anomalies(results)
+        else:
+            return results
     
     
 # =========================================
@@ -1369,8 +1349,8 @@ if __name__ == "__main__":
     
     # 设置时间范围（每半小时一个故障注入）
     tz = "Asia/Shanghai"
-    start = pd.Timestamp(datetime(2025, 8, 19, 1, 0, 0), tz=tz)
-    end   = pd.Timestamp(datetime(2025, 8, 19, 23, 59, 59), tz=tz)
+    start = pd.Timestamp(datetime(2025, 8, 19, 2, 00, 0), tz=tz)
+    end   = pd.Timestamp(datetime(2025, 8, 19, 2, 29, 59), tz=tz)
     
     # 使用批量化处理函数生成多个case
     generate_batch_cases(
