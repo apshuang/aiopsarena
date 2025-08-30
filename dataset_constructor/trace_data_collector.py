@@ -315,7 +315,7 @@ async def main():
     # await maintainer.start()
 
     # 或者：提取某一天的所有 trace
-    await extract_full_day(maintainer, "2025-08-19", tz=timezone(timedelta(hours=8)))  # 输入北京时间
+    await extract_full_day(maintainer, "2025-08-26", tz=timezone(timedelta(hours=8)))  # 输入北京时间
 
 
 if __name__ == "__main__":
