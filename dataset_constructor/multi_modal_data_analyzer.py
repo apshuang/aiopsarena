@@ -841,7 +841,13 @@ class LogAnalyzer:
         df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Shanghai")  # 转到北京时间
 
         # 删除缺失值
-        df = df.dropna(subset=["timestamp", "cmdb_id", "message"])
+        if "message" in df.columns:
+            df = df.dropna(subset=["timestamp", "cmdb_id", "message"])
+        elif "value" in df.columns:
+            df = df.dropna(subset=["timestamp", "cmdb_id", "value"])
+        else:
+            # 两个字段都没有就直接返回空
+            return pd.DataFrame()
         df = df.sort_values("timestamp")
 
         # 归一化 cmdb_id：去掉 pod 层级，只保留 service
@@ -928,10 +934,19 @@ class TraceLatencyDetector:
         # 遍历 (cmdb_id, operation_name) 分组
         grouped_baseline = baseline_df.groupby(["cmdb_id", "operation_name"])
         for (cmdb_id, op), base in grouped_baseline:
-            mean = base["duration"].mean()
-            std = base["duration"].std(ddof=0) if len(base) > 1 else 1e-9
-            std = max(std, 1e-3)
-            up_th = mean + self.n_sigma * std
+            # 确保duration是数值类型
+            try:
+                base_duration = pd.to_numeric(base["duration"], errors="coerce")
+                base_duration = base_duration.dropna()
+                if base_duration.empty:
+                    continue
+                mean = base_duration.mean()
+                std = base_duration.std(ddof=0) if len(base_duration) > 1 else 1e-9
+                std = max(std, 1e-3)
+                up_th = mean + self.n_sigma * std
+            except Exception as e:
+                print(f"处理baseline duration时出错: {e}")
+                continue
 
             # 在检测区间内筛选对应的 traces
             q = trace_df[
@@ -943,7 +958,18 @@ class TraceLatencyDetector:
 
             if q.empty:
                 continue
-            abn = q[q["duration"] > up_th]
+            
+            # 确保duration是数值类型
+            try:
+                q_duration = pd.to_numeric(q["duration"], errors="coerce")
+                q_duration = q_duration.dropna()
+                if q_duration.empty:
+                    continue
+                abn = q.loc[q_duration.index][q_duration > up_th]
+            except Exception as e:
+                print(f"处理query duration时出错: {e}")
+                continue
+            
             if len(abn) >= self.min_count:
                 results.append({
                     "pattern": "TraceLatency",
@@ -977,7 +1003,13 @@ class TraceErrorRateDetector:
 
         # 基线错误率
         if not baseline_df.empty:
-            baseline_err_ratio = (baseline_df["status_code"] >= 400).mean()
+            # 确保status_code是数值类型
+            try:
+                baseline_status_codes = pd.to_numeric(baseline_df["status_code"], errors="coerce")
+                baseline_err_ratio = (baseline_status_codes >= 400).mean()
+            except Exception as e:
+                print(f"处理baseline status_code时出错: {e}")
+                baseline_err_ratio = 0.0
         else:
             baseline_err_ratio = 0.0
 
@@ -1109,6 +1141,81 @@ class TraceAnalyzer:
         if all_df:
             self.traces = pd.concat(all_df, ignore_index=True).dropna(subset=["timestamp", "cmdb_id", "trace_id", "span_id"])
             self.traces = self.traces.sort_values("timestamp").reset_index(drop=True)
+            
+    def load_traces_for_openrca(self, folder_path: Path, analysis_start_time: datetime, analysis_end_time: datetime) -> None:
+        """
+        专门用于OpenRCA的trace加载函数，只加载必要的时间窗口文件以节省内存
+        
+        Args:
+            folder_path: trace文件夹路径
+            analysis_start_time: 当前分析的时间窗口开始时间
+            analysis_end_time: 当前分析的时间窗口结束时间
+        """
+        # 计算baseline时间（假设baseline是每天固定时间，比如凌晨0-1点）
+        baseline_start_hour = 2  # 凌晨2点开始
+        baseline_duration_hours = 1  # 持续2小时
+        
+        # 获取分析日期
+        analysis_date = analysis_start_time.date()
+        
+        # 计算baseline时间窗口
+        baseline_start = datetime.combine(analysis_date, time(baseline_start_hour, 0))
+        baseline_start = baseline_start.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        baseline_end = baseline_start + timedelta(hours=baseline_duration_hours)
+        
+        # 确定需要加载的小时文件
+        hours_to_load = set()
+        
+        # 添加baseline时间对应的小时
+        baseline_hour = baseline_start.hour
+        hours_to_load.add(baseline_hour)
+        
+        # 添加分析时间窗口对应的小时
+        # 由于每个时间窗口不跨小时，只需要添加开始时间对应的小时
+        analysis_hour = analysis_start_time.hour
+        hours_to_load.add(analysis_hour)
+        
+        print(f"  将加载trace文件，小时: {sorted(hours_to_load)} (baseline: {baseline_hour}, 分析: {analysis_hour})")
+        
+        all_df = []
+        for hour in hours_to_load:
+            # 构建文件名格式，假设是类似 "trace_2022-03-20_09.csv" 的格式
+            hour_str = f"{hour:02d}"
+            filename = f"trace_{analysis_date.strftime('%Y-%m-%d')}_{hour_str}-00-00.csv"
+            file_path = folder_path / filename
+            
+            if file_path.exists():
+                print(f"    加载trace文件: {filename}")
+                df = pd.read_csv(file_path)
+                df = df.rename(columns={c: c.lower() for c in df.columns})
+                
+                # 处理 timestamp
+                if pd.api.types.is_integer_dtype(df["timestamp"]):
+                    max_ts = df["timestamp"].max()
+                    if max_ts > 1e15:  # 微秒
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="us")
+                    elif max_ts > 1e12:  # 毫秒
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                    else:  # 秒
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+                else:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+                    
+                # 转到北京时间
+                df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
+                df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Shanghai")
+                
+                all_df.append(df)
+            else:
+                print(f"    警告: trace文件不存在: {filename}")
+        
+        if all_df:
+            self.traces = pd.concat(all_df, ignore_index=True).dropna(subset=["timestamp", "cmdb_id", "trace_id", "span_id"])
+            self.traces = self.traces.sort_values("timestamp").reset_index(drop=True)
+            print(f"    成功加载trace数据，共 {len(self.traces)} 条记录")
+        else:
+            self.traces = None
+            print("    未找到可用的trace文件")
 
     def register_detector(self, detector: TraceAnomalyDetector) -> None:
         self.detectors.append(detector)
@@ -1130,86 +1237,6 @@ def serialize(anomaly):
         if key in a and hasattr(a[key], "isoformat"):
             a[key] = a[key].isoformat()
     return a
-
-
-def generate_batch_cases(
-    start_time: datetime,
-    end_time: datetime,
-    metric_analyzer: MetricAnalyzer,
-    log_analyzer: LogAnalyzer,
-    trace_analyzer: TraceAnalyzer,
-    ground_truth_extractor: GroundTruthExtractor,
-    data_root_path: Path,
-    output_folder: Path,
-    time_window_minutes: int = 30
-):
-    """
-    批量生成case，按指定时间窗口划分
-    
-    Args:
-        start_time: 开始时间（带时区）
-        end_time: 结束时间（带时区）
-        metric_analyzer: 指标分析器
-        log_analyzer: 日志分析器
-        trace_analyzer: 链路分析器
-        ground_truth_extractor: 真实标签提取器
-        data_root_path: 数据根路径
-        output_folder: 输出文件夹
-        time_window_minutes: 时间窗口大小（分钟），默认30分钟
-    """
-    # 确保时区一致
-    if start_time.tzinfo is None:
-        start_time = start_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-    if end_time.tzinfo is None:
-        end_time = end_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-    
-    # 生成时间窗口列表
-    time_windows = []
-    current_time = start_time
-    while current_time < end_time:
-        window_end = min(current_time + timedelta(minutes=time_window_minutes), end_time)
-        time_windows.append((current_time, window_end))
-        current_time = window_end
-    
-    print(f"将生成 {len(time_windows)} 个case，时间窗口: {time_window_minutes}分钟")
-    
-    # 为每个时间窗口生成case
-    for i, (window_start, window_end) in enumerate(time_windows):
-        print(f"正在处理第 {i+1}/{len(time_windows)} 个时间窗口: {window_start.strftime('%Y-%m-%d %H:%M:%S')} ~ {window_end.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # 获取日期字符串用于数据加载
-        date = window_start.strftime("%Y-%m-%d")
-        
-        # 加载对应日期的数据
-        metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container")
-        trace_analyzer.load_traces_from_folder(data_root_path / date / "trace")
-        
-        # 查询异常信息
-        metric_anomalies = metric_analyzer.query_anomalies(window_start, window_end)
-        log_anomalies = log_analyzer.query_anomalies(window_start, window_end)
-        trace_anomalies = trace_analyzer.query_anomalies(window_start, window_end)
-        
-        anomaly_information = metric_anomalies + log_anomalies + trace_anomalies
-        
-        # 查询真实标签
-        ground_truth = ground_truth_extractor.query_injection(window_start, window_end)
-        
-        # 生成case
-        time_range_str = f"{window_start.isoformat()} ~ {window_end.isoformat()}"
-        
-        case = {
-            "fault_time_window": time_range_str,
-            "anomaly_information": [serialize(a) for a in anomaly_information],
-            "ground_truth": ground_truth
-        }
-        
-        # 保存case文件
-        output_file = output_folder / (f"Bravo_case_{window_start.strftime('%Y%m%d_%H-%M-%S')}.json")
-        
-        with output_file.open("w", encoding="utf-8") as f:
-            json.dump(case, f, ensure_ascii=False, indent=4)
-        
-        print(f"已生成: {output_file.name}")
 
 
 class GroundTruthExtractor:
@@ -1307,6 +1334,186 @@ class GroundTruthExtractor:
         self.conn.close()
 
 
+def generate_batch_cases(
+    start_time: datetime,
+    end_time: datetime,
+    metric_analyzer: MetricAnalyzer,
+    log_analyzer: LogAnalyzer,
+    trace_analyzer: TraceAnalyzer,
+    ground_truth_extractor: GroundTruthExtractor,
+    data_root_path: Path,
+    output_folder: Path,
+    time_window_minutes: int = 30
+):
+    """
+    批量生成case，按指定时间窗口划分
+    
+    Args:
+        start_time: 开始时间（带时区）
+        end_time: 结束时间（带时区）
+        metric_analyzer: 指标分析器
+        log_analyzer: 日志分析器
+        trace_analyzer: 链路分析器
+        ground_truth_extractor: 真实标签提取器
+        data_root_path: 数据根路径
+        output_folder: 输出文件夹
+        time_window_minutes: 时间窗口大小（分钟），默认30分钟
+    """
+    # 确保时区一致
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    
+    # 生成时间窗口列表
+    time_windows = []
+    current_time = start_time
+    while current_time < end_time:
+        window_end = min(current_time + timedelta(minutes=time_window_minutes), end_time)
+        time_windows.append((current_time, window_end))
+        current_time = window_end
+    
+    print(f"将生成 {len(time_windows)} 个case，时间窗口: {time_window_minutes}分钟")
+    
+    # 为每个时间窗口生成case
+    for i, (window_start, window_end) in enumerate(time_windows):
+        print(f"正在处理第 {i+1}/{len(time_windows)} 个时间窗口: {window_start.strftime('%Y-%m-%d %H:%M:%S')} ~ {window_end.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # 获取日期字符串用于数据加载
+        date = window_start.strftime("%Y-%m-%d")
+        
+        # 加载对应日期的数据
+        metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container")
+        trace_analyzer.load_traces_from_folder(data_root_path / date / "trace")
+        
+        # 查询异常信息
+        metric_anomalies = metric_analyzer.query_anomalies(window_start, window_end)
+        log_anomalies = log_analyzer.query_anomalies(window_start, window_end)
+        trace_anomalies = trace_analyzer.query_anomalies(window_start, window_end)
+        
+        anomaly_information = metric_anomalies + log_anomalies + trace_anomalies
+        
+        # 查询真实标签
+        ground_truth = ground_truth_extractor.query_injection(window_start, window_end)
+        
+        # 生成case
+        time_range_str = f"{window_start.isoformat()} ~ {window_end.isoformat()}"
+        
+        case = {
+            "fault_time_window": time_range_str,
+            "anomaly_information": [serialize(a) for a in anomaly_information],
+            "ground_truth": ground_truth
+        }
+        
+        # 保存case文件
+        output_file = output_folder / (f"Bravo_case_{window_start.strftime('%Y%m%d_%H-%M-%S')}.json")
+        
+        with output_file.open("w", encoding="utf-8") as f:
+            json.dump(case, f, ensure_ascii=False, indent=4)
+        
+        print(f"已生成: {output_file.name}")
+        
+        
+# =============================
+# OpenRCA 分析函数
+# =============================
+
+# 设置CSV文件路径常量
+OPENRCA_CSV_PATH = "/home/ubuntu/Market/cloudbed-1/query_simple_with_time.csv"
+
+def generate_openrca_cases(
+    metric_analyzer: MetricAnalyzer,
+    log_analyzer: LogAnalyzer,
+    trace_analyzer: TraceAnalyzer,
+    data_root_path: Path,
+    output_folder: Path
+):
+    """
+    专门用于分析OpenRCA的函数，从CSV文件读取时间窗口信息
+    
+    Args:
+        metric_analyzer: 指标分析器
+        log_analyzer: 日志分析器
+        trace_analyzer: 链路分析器
+        ground_truth_extractor: 真实标签提取器
+        data_root_path: 数据根路径
+        output_folder: 输出文件夹
+    """
+    # 读取CSV文件
+    try:
+        df = pd.read_csv(OPENRCA_CSV_PATH)
+        print(f"成功读取OpenRCA CSV文件，共 {len(df)} 个任务")
+    except Exception as e:
+        print(f"读取CSV文件失败: {e}")
+        return
+    
+    # 确保输出文件夹存在
+    output_folder.mkdir(parents=True, exist_ok=True)
+    
+    # 处理每个任务
+    for index, row in df.iterrows():
+        task_index = row['task_index']
+        instruction = row['instruction']
+        scoring_points = row['scoring_points']
+        start_time_str = row['start_time']
+        end_time_str = row['end_time']
+        
+        print(f"正在处理任务 {index+1}/{len(df)}: {task_index}")
+        print(f"  时间窗口: {start_time_str} ~ {end_time_str}")
+        
+        try:
+            # 解析时间字符串 (格式: 2022/3/20 9:00)
+            start_time = datetime.strptime(start_time_str, "%Y/%m/%d %H:%M")
+            end_time = datetime.strptime(end_time_str, "%Y/%m/%d %H:%M")
+            
+            # 设置时区为北京时间
+            start_time = start_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            end_time = end_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            
+            print(f"  解析后的时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # 获取日期字符串用于数据加载
+            date = start_time.strftime("%Y-%m-%d")
+            
+            # 加载对应日期的数据
+            metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container")
+            trace_analyzer.load_traces_for_openrca(data_root_path / date / "trace", start_time, end_time)
+            
+            # 查询异常信息
+            metric_anomalies = metric_analyzer.query_anomalies(start_time, end_time)
+            log_anomalies = log_analyzer.query_anomalies(start_time, end_time)
+            trace_anomalies = trace_analyzer.query_anomalies(start_time, end_time)
+            
+            anomaly_information = metric_anomalies + log_anomalies + trace_anomalies
+            
+            # 查询真实标签
+            # ground_truth = ground_truth_extractor.query_injection(start_time, end_time)
+            
+            # 生成case
+            time_range_str = f"{start_time.isoformat()} ~ {end_time.isoformat()}"
+            
+            case = {
+                "fault_time_window": time_range_str,
+                "anomaly_information": [serialize(a) for a in anomaly_information],
+                # "ground_truth": ground_truth
+            }
+            
+            # 保存case文件
+            output_file = output_folder / (f"OpenRCA_case_{task_index}_{start_time.strftime('%Y%m%d_%H-%M')}.json")
+            
+            with output_file.open("w", encoding="utf-8") as f:
+                json.dump(case, f, ensure_ascii=False, indent=4)
+            
+            print(f"  已生成: {output_file.name}")
+            break
+            
+        except Exception as e:
+            print(f"  处理任务 {task_index} 时出错: {e}")
+            continue
+    
+    print(f"OpenRCA分析完成，共处理 {len(df)} 个任务")
+
+
 if __name__ == "__main__":
     data_root_path = Path("./multi_modal_data")
     output_folder = Path("./case")
@@ -1339,30 +1546,49 @@ if __name__ == "__main__":
     trace_analyzer.register_detector(TraceErrorRateDetector())
     trace_analyzer.register_detector(TraceTopologyChangeDetector())
     
-    ground_truth_extractor = GroundTruthExtractor(
-        host="172.17.0.2",
-        port=3306,
-        user="root",
-        password="elastic",
-        database="chaos_mesh"
-    )
     
-    # 设置时间范围（每半小时一个故障注入）
-    tz = "Asia/Shanghai"
-    start = pd.Timestamp(datetime(2025, 8, 19, 2, 00, 0), tz=tz)
-    end   = pd.Timestamp(datetime(2025, 8, 19, 2, 29, 59), tz=tz)
     
-    # 使用批量化处理函数生成多个case
-    generate_batch_cases(
-        start_time=start.to_pydatetime(),
-        end_time=end.to_pydatetime(),
-        metric_analyzer=metric_analyzer,
-        log_analyzer=log_analyzer,
-        trace_analyzer=trace_analyzer,
-        ground_truth_extractor=ground_truth_extractor,
-        data_root_path=data_root_path,
-        output_folder=output_folder,
-        time_window_minutes=30  # 30分钟时间窗口
-    )
+    
+    ANALYZE_PLATFORM = "OpenRCA"
+    
+    
+    if ANALYZE_PLATFORM == "AIOps-Bravo":
+        ground_truth_extractor = GroundTruthExtractor(
+            host="172.17.0.2",
+            port=3306,
+            user="root",
+            password="elastic",
+            database="chaos_mesh"
+        )
+        
+        batch_date_list = [25]
+        for _date in batch_date_list:
+            # 设置时间范围（每半小时一个故障注入）
+            tz = "Asia/Shanghai"
+            start = pd.Timestamp(datetime(2025, 8, _date, 1, 00, 0), tz=tz)
+            end   = pd.Timestamp(datetime(2025, 8, _date, 23, 59, 59), tz=tz)
+            
+            # 使用批量化处理函数生成多个case
+            generate_batch_cases(
+                start_time=start.to_pydatetime(),
+                end_time=end.to_pydatetime(),
+                metric_analyzer=metric_analyzer,
+                log_analyzer=log_analyzer,
+                trace_analyzer=trace_analyzer,
+                ground_truth_extractor=ground_truth_extractor,
+                data_root_path=data_root_path,
+                output_folder=output_folder,
+                time_window_minutes=30  # 30分钟时间窗口
+            )
+        ground_truth_extractor.close_connection()
   
-    ground_truth_extractor.close_connection()
+    elif ANALYZE_PLATFORM == "OpenRCA":
+        generate_openrca_cases(
+            metric_analyzer=metric_analyzer,
+            log_analyzer=log_analyzer,
+            trace_analyzer=trace_analyzer,
+            data_root_path=data_root_path,
+            output_folder=output_folder
+        )
+    
+    
