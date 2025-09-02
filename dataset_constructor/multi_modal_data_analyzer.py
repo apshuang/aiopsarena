@@ -439,6 +439,9 @@ class MetricAnalyzer:
 
             # 转到北京时间
             df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Shanghai")
+            
+            # 确保value字段是数值类型
+            df["value"] = pd.to_numeric(df["value"], errors="coerce")
             df = df[["timestamp", "cmdb_id", "kpi_name", "value"]].dropna(subset=["timestamp", "cmdb_id", "kpi_name", "value"])
             
             df = df.sort_values("timestamp")
@@ -538,7 +541,7 @@ class KeywordAndCodeDetector:
         exclude_keywords: list[str] = [],
         error_codes: list[str] = [],
         min_count: int = 3,
-        text_columns: tuple[str, ...] = ("log_message", "message", "msg"),
+        text_columns: tuple[str, ...] = ("log_message", "message", "msg", "value"),
     ):
         self.include_keywords = [kw.lower() for kw in include_keywords]
         self.exclude_keywords = [kw.lower() for kw in exclude_keywords]
@@ -1017,7 +1020,13 @@ class TraceErrorRateDetector:
         if q.empty:
             return results
 
-        err_ratio = (q["status_code"] >= 400).mean()
+        # 确保status_code是数值类型
+        try:
+            q_status_codes = pd.to_numeric(q["status_code"], errors="coerce")
+            err_ratio = (q_status_codes >= 400).mean()
+        except Exception as e:
+            print(f"处理query status_code时出错: {e}")
+            err_ratio = 0.0
         if err_ratio - baseline_err_ratio >= self.ratio_threshold:
             results.append({
                 "pattern": "TraceErrorRate",
@@ -1136,6 +1145,12 @@ class TraceAnalyzer:
             # 转到北京时间
             df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")      # 告诉 pandas 这是 UTC
             df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Shanghai")
+            
+            # 确保数值字段是数值类型
+            if "duration" in df.columns:
+                df["duration"] = pd.to_numeric(df["duration"], errors="coerce")
+            if "status_code" in df.columns:
+                df["status_code"] = pd.to_numeric(df["status_code"], errors="coerce")
 
             all_df.append(df)
         if all_df:
@@ -1204,6 +1219,12 @@ class TraceAnalyzer:
                 # 转到北京时间
                 df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
                 df["timestamp"] = df["timestamp"].dt.tz_convert("Asia/Shanghai")
+                
+                # 确保数值字段是数值类型
+                if "duration" in df.columns:
+                    df["duration"] = pd.to_numeric(df["duration"], errors="coerce")
+                if "status_code" in df.columns:
+                    df["status_code"] = pd.to_numeric(df["status_code"], errors="coerce")
                 
                 all_df.append(df)
             else:
@@ -1419,7 +1440,7 @@ def generate_batch_cases(
 # =============================
 
 # 设置CSV文件路径常量
-OPENRCA_CSV_PATH = "/home/ubuntu/Market/cloudbed-1/query_simple_with_time.csv"
+OPENRCA_CSV_PATH = "/home/ubuntu/ls/Market/cloudbed-1/query_simple_with_time.csv"
 
 def generate_openrca_cases(
     metric_analyzer: MetricAnalyzer,
@@ -1514,12 +1535,20 @@ def generate_openrca_cases(
     print(f"OpenRCA分析完成，共处理 {len(df)} 个任务")
 
 
+ANALYZE_PLATFORM = "OpenRCA"  # 设置分析的目标平台
+
 if __name__ == "__main__":
-    data_root_path = Path("./multi_modal_data")
+    # 设置多模态数据的根目录
+    if ANALYZE_PLATFORM == "AIOps-Bravo":
+        data_root_path = Path("./multi_modal_data")
+    elif ANALYZE_PLATFORM == "OpenRCA":
+        data_root_path = Path("/home/ubuntu/ls/Market/cloudbed-1/telemetry")
+    
+    # 设置案例的输出目录
     output_folder = Path("./case")
     
-    metric_analyzer = MetricAnalyzer()
     
+    metric_analyzer = MetricAnalyzer()
     metric_analyzer.register_detector(SASDetector(n_sigma=3, min_duration_minutes=5))
     metric_analyzer.register_detector(SpikeDetector(spike_threshold=10, min_spike_duration_seconds=30, max_spike_duration_seconds=60, relative_threshold=8, resample_rule="15s"))
     
@@ -1532,8 +1561,6 @@ if __name__ == "__main__":
             min_count=3
         )
     )
-    
-    # 注册日志量异常检测器
     log_analyzer.register_detector(
         LogVolumeAnomalyDetector(
             volume_threshold=0.066,  # 日志量变化6.66%以上视为异常
@@ -1546,12 +1573,6 @@ if __name__ == "__main__":
     trace_analyzer.register_detector(TraceErrorRateDetector())
     trace_analyzer.register_detector(TraceTopologyChangeDetector())
     
-    
-    
-    
-    ANALYZE_PLATFORM = "OpenRCA"
-    
-    
     if ANALYZE_PLATFORM == "AIOps-Bravo":
         ground_truth_extractor = GroundTruthExtractor(
             host="172.17.0.2",
@@ -1560,7 +1581,6 @@ if __name__ == "__main__":
             password="elastic",
             database="chaos_mesh"
         )
-        
         batch_date_list = [25]
         for _date in batch_date_list:
             # 设置时间范围（每半小时一个故障注入）
