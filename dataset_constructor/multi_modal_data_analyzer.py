@@ -414,15 +414,17 @@ class MetricAnalyzer:
     def __init__(
         self,
         baseline_start_tod: time = time(0, 5, 0),
-        baseline_duration: timedelta = timedelta(minutes=55)
+        baseline_duration: timedelta = timedelta(minutes=55),
+        filter_file_name_list: list[str] = []
     ):
         self.metrics: dict[str, pd.DataFrame] = {}
         self.detectors: list[MetricAnomalyDetector] = []
         self.baseline_start_tod = baseline_start_tod
         self.baseline_duration = baseline_duration
+        self.filter_file_name_list = filter_file_name_list
 
     def load_metrics_from_folder(self, folder_path: Path) -> None:
-        files = [folder_path / f for f in os.listdir(folder_path) if f.endswith(".csv")]
+        files = [folder_path / f for f in os.listdir(folder_path) if f.endswith(".csv") and f not in self.filter_file_name_list]
         for file in files:
             df = pd.read_csv(file)
             df = df.rename(columns={c: c.lower() for c in df.columns})
@@ -467,6 +469,21 @@ class MetricAnalyzer:
             base = base.split("minikube.", 1)[1]
         return base
     
+    def normalize_cmdb_id_OpenRCA(self, cmdb_id: str) -> str:
+        cmdb_id = cmdb_id.rsplit("-", 1)[0]
+        # 去掉前缀
+        if cmdb_id.startswith("node-5."):
+            cmdb_id = cmdb_id.split("node-5.", 1)[1]
+        if cmdb_id.startswith("node-6."):
+            cmdb_id = cmdb_id.split("node-6.", 1)[1]
+        
+        # 去掉数字后缀，将"adservice2"和"adservice"等当作同一类
+        import re
+        # 使用正则表达式去掉末尾的数字
+        cmdb_id = re.sub(r'\d+$', '', cmdb_id)
+        
+        return cmdb_id
+    
     def to_datetime(self, val):
         if isinstance(val, datetime):
             return val
@@ -479,7 +496,10 @@ class MetricAnalyzer:
         groups = defaultdict(list)
 
         for anomaly in anomalies:
-            cmdb_id = self.normalize_cmdb_id(anomaly["cmdb_id"])
+            if ANALYZE_PLATFORM == "OpenRCA":
+                cmdb_id = self.normalize_cmdb_id_OpenRCA(anomaly["cmdb_id"])
+            elif ANALYZE_PLATFORM == "AIOpsBravo":
+                cmdb_id = self.normalize_cmdb_id(anomaly["cmdb_id"])
             key = (cmdb_id, anomaly["pattern"], anomaly["metric_name"])
             groups[key].append(anomaly)
 
@@ -491,7 +511,7 @@ class MetricAnalyzer:
 
             aggregated = {
                 "cmdb_id": cmdb_id,
-                "pattern": "Static-Anomaly-Static",
+                "pattern": pattern,
                 "metric_name": metric_name,
                 "start": min(start_times).isoformat(),
                 "end": max(end_times).isoformat(),
@@ -612,8 +632,8 @@ class KeywordAndCodeDetector:
                     text_str = str(text)
                     for code in self.error_codes:
                         # 使用正则表达式匹配，确保错误码是独立的数字
-                        # 匹配模式：错误码前后不能是数字，但可以是空格、标点符号等
-                        pattern = r'(?<!\d)' + re.escape(code) + r'(?!\d)'
+                        # 匹配模式：错误码前后不能是数字或字母，只能是空格、标点符号等
+                        pattern = r'(?<![a-zA-Z0-9])' + re.escape(code) + r'(?![a-zA-Z0-9])'
                         if re.search(pattern, text_str):
                             matched_codes.append(code)
                     return matched_codes
@@ -1261,16 +1281,22 @@ def serialize(anomaly):
 
 
 class GroundTruthExtractor:
-    def __init__(self, host: str, port: int, user: str, password: str, database: str):
-        self.conn = pymysql.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            database=database,
-            charset="utf8mb4",
-            cursorclass=DictCursor
-        )
+    def __init__(self, host: str, port: int, user: str, password: str, database: str, record_file_path: str = ""):
+        try:
+            self.conn = pymysql.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
+                charset="utf8mb4",
+                cursorclass=DictCursor
+            )
+        except Exception as e:
+            # 如果数据库连接失败，设置为None，用于OpenRCA模式
+            print(f"数据库连接失败，将使用record文件模式: {e}")
+            self.conn = None
+        self.record_file_path = record_file_path
         
     def parse_duration_str(self, duration_str: str) -> int:
         """
@@ -1302,6 +1328,9 @@ class GroundTruthExtractor:
         start_time / end_time 为 UTC datetime
         返回的 start_time / finish_time 为 UTC+8 datetime
         """
+        if self.conn is None:
+            raise ValueError("数据库连接未建立，无法查询注入信息")
+            
         tz_offset = 8  # UTC+8
 
         sql = """
@@ -1351,8 +1380,49 @@ class GroundTruthExtractor:
             raise ValueError("查询结果超过 1 条，时间区间不应重叠！")
         return results[0] if results else None
 
+    def query_injection_from_record(self, start_time, end_time):
+        """
+        从record文件读取故障注入记录，适用于OpenRCA
+        Args:
+            start_time: 查询开始时间 (datetime)
+            end_time: 查询结束时间 (datetime) 
+        """
+
+        try:
+            # 读取record文件
+            df = pd.read_csv(self.record_file_path)
+            
+            # 将timestamp转换为datetime
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
+            df['datetime'] = df['datetime'].dt.tz_localize('UTC').dt.tz_convert('Asia/Shanghai')
+            
+            # 过滤时间范围内的记录
+            mask = (df['datetime'] >= start_time) & (df['datetime'] <= end_time)
+            filtered_df = df[mask]
+            
+            if filtered_df.empty:
+                return None
+            
+            record = filtered_df.iloc[0]
+            
+            inject_time = record['datetime']
+            result = {
+                "inject_time": inject_time.isoformat(),
+                "recover_time": "unknown",
+                "inject_type": record['reason'],
+                "inject_component": record['component'],
+                "inject_level": record['level']
+            }
+            
+            return result
+            
+        except Exception as e:
+            print(f"读取record文件时出错: {e}")
+            return None
+
     def close_connection(self):
-        self.conn.close()
+        if self.conn is not None:
+            self.conn.close()
 
 
 def generate_batch_cases(
@@ -1446,6 +1516,7 @@ def generate_openrca_cases(
     metric_analyzer: MetricAnalyzer,
     log_analyzer: LogAnalyzer,
     trace_analyzer: TraceAnalyzer,
+    ground_truth_extractor: GroundTruthExtractor,
     data_root_path: Path,
     output_folder: Path
 ):
@@ -1508,7 +1579,7 @@ def generate_openrca_cases(
             anomaly_information = metric_anomalies + log_anomalies + trace_anomalies
             
             # 查询真实标签
-            # ground_truth = ground_truth_extractor.query_injection(start_time, end_time)
+            ground_truth = ground_truth_extractor.query_injection_from_record(start_time, end_time)
             
             # 生成case
             time_range_str = f"{start_time.isoformat()} ~ {end_time.isoformat()}"
@@ -1516,7 +1587,7 @@ def generate_openrca_cases(
             case = {
                 "fault_time_window": time_range_str,
                 "anomaly_information": [serialize(a) for a in anomaly_information],
-                # "ground_truth": ground_truth
+                "ground_truth": ground_truth
             }
             
             # 保存case文件
@@ -1548,8 +1619,8 @@ if __name__ == "__main__":
     output_folder = Path("./case")
     
     
-    metric_analyzer = MetricAnalyzer()
-    metric_analyzer.register_detector(SASDetector(n_sigma=3, min_duration_minutes=5))
+    metric_analyzer = MetricAnalyzer(filter_file_name_list=["metric_mesh.csv", "metric_node.csv", "metric_runtime.csv"])
+    metric_analyzer.register_detector(SASDetector(n_sigma=5, min_duration_minutes=5))
     metric_analyzer.register_detector(SpikeDetector(spike_threshold=10, min_spike_duration_seconds=30, max_spike_duration_seconds=60, relative_threshold=8, resample_rule="15s"))
     
     log_analyzer = LogAnalyzer(data_root_path)
@@ -1571,7 +1642,7 @@ if __name__ == "__main__":
     trace_analyzer = TraceAnalyzer(data_root_path)
     trace_analyzer.register_detector(TraceLatencyDetector())
     trace_analyzer.register_detector(TraceErrorRateDetector())
-    trace_analyzer.register_detector(TraceTopologyChangeDetector())
+    # trace_analyzer.register_detector(TraceTopologyChangeDetector())
     
     if ANALYZE_PLATFORM == "AIOps-Bravo":
         ground_truth_extractor = GroundTruthExtractor(
@@ -1603,10 +1674,21 @@ if __name__ == "__main__":
         ground_truth_extractor.close_connection()
   
     elif ANALYZE_PLATFORM == "OpenRCA":
+        # 为OpenRCA创建ground_truth_extractor实例（不需要数据库连接）
+        ground_truth_extractor = GroundTruthExtractor(
+            host="localhost",  # 占位符，实际不会使用数据库
+            port=3306,
+            user="root", 
+            password="password",
+            database="test",
+            record_file_path="/home/ubuntu/ls/Market/cloudbed-1/record_sorted.csv"
+        )
+        
         generate_openrca_cases(
             metric_analyzer=metric_analyzer,
             log_analyzer=log_analyzer,
             trace_analyzer=trace_analyzer,
+            ground_truth_extractor=ground_truth_extractor,
             data_root_path=data_root_path,
             output_folder=output_folder
         )
