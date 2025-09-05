@@ -405,7 +405,7 @@ async def main():
         url="http://localhost:9090"
     )
 
-    maintainer = MetricMaintainer(extractor, output_root="./multi_modal_data")
+    maintainer = MetricMaintainer(extractor, output_root="./multi_modal_data", step=5)
 
     # 启动定时模式
     # await maintainer.start()

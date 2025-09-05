@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from collections import defaultdict
 import pandas as pd
+import numpy as np
 
 AGGREGATE_MODE = True
 
@@ -161,35 +162,21 @@ class SASDetector:
 class SpikeDetector:
     """
     专门用于检测突发、短暂、极强烈的峰值的检测器
-    
-    特点：
-    1. 检测突发性峰值（spike）
-    2. 识别短暂但极强烈的异常
-    3. 使用多种算法组合提高检测准确性
-    4. 支持配置峰值检测的敏感度和持续时间要求
     """
     
     def __init__(
         self,
-        spike_threshold: float = 5.0,           # 峰值检测阈值（相对于基线的倍数）
-        min_spike_duration_seconds: int = 10,   # 最小峰值持续时间（秒）
-        max_spike_duration_seconds: int = 300,  # 最大峰值持续时间（秒）
-        relative_threshold: float = 3.0,        # 相对阈值（相对于周围数据的倍数）
+        spike_threshold: float = 2.0,           # 峰值检测阈值（相对于两端数据的倍数）
+        min_duration: int = 1,                  # 最小峰值持续时间（数据点数量）
+        max_duration: int = 3,                 # 最大峰值持续时间（数据点数量）
         resample_rule: str | None = "10s",      # 重采样规则
-        enable_derivative_detection: bool = True,  # 启用导数检测
-        derivative_threshold: float = 2.0,      # 导数检测阈值
-        enable_pattern_detection: bool = True,  # 启用模式检测
-        min_peak_height: float = 0.1            # 最小峰值高度（相对于基线）
+        debug_mode: bool = False                # 调试模式，显示详细信息
     ):
         self.spike_threshold = spike_threshold
-        self.min_spike_duration_seconds = min_spike_duration_seconds
-        self.max_spike_duration_seconds = max_spike_duration_seconds
-        self.relative_threshold = relative_threshold
+        self.min_duration = min_duration
+        self.max_duration = max_duration
         self.resample_rule = resample_rule
-        self.enable_derivative_detection = enable_derivative_detection
-        self.derivative_threshold = derivative_threshold
-        self.enable_pattern_detection = enable_pattern_detection
-        self.min_peak_height = min_peak_height
+        self.debug_mode = debug_mode
         
     def normalize_cmdb_id(self, cmdb_id: str) -> str:
         # 去掉副本号
@@ -204,131 +191,226 @@ class SpikeDetector:
             return val
         return datetime.fromisoformat(val)
 
-    def _detect_spikes_by_threshold(self, query_df: pd.DataFrame, baseline_mean: float, baseline_std: float) -> pd.DataFrame:
-        """基于阈值的峰值检测"""
-        # 计算相对于基线的倍数
-        query_df["baseline_ratio"] = query_df["value"] / max(baseline_mean, 1e-6)
-        
-        # 计算相对于周围数据的倍数（滑动窗口）
-        window_size = max(3, len(query_df) // 10)
-        if len(query_df) >= window_size:
-            query_df["local_ratio"] = query_df["value"].rolling(
-                window=window_size, center=True, min_periods=1
-            ).apply(lambda x: x.iloc[len(x)//2] / x.mean() if x.mean() > 0 else 1.0)
-        else:
-            query_df["local_ratio"] = 1.0
-        
-        # 峰值检测条件
-        spike_condition = (
-            (query_df["baseline_ratio"] >= self.spike_threshold) |
-            (query_df["local_ratio"] >= self.relative_threshold)
-        )
-        
-        # 最小峰值高度要求
-        if self.min_peak_height > 0:
-            height_condition = abs(query_df["value"] - baseline_mean) >= (self.min_peak_height * baseline_mean)
-            spike_condition = spike_condition & height_condition
-        
-        query_df["is_spike"] = spike_condition
-        return query_df
+    def _debug_print(self, message: str, data: dict | None = None):
+        """调试信息输出方法"""
+        if self.debug_mode:
+            print(f"[SpikeDetector DEBUG] {message}")
+            if data:
+                for key, value in data.items():
+                    print(f"  {key}: {value}")
+            print()
 
-    def _detect_spikes_by_derivative(self, query_df: pd.DataFrame) -> pd.DataFrame:
-        """基于导数的峰值检测"""
-        if not self.enable_derivative_detection or len(query_df) < 3:
-            query_df["is_derivative_spike"] = False
+    def _detect_simple_spikes(self, query_df: pd.DataFrame) -> pd.DataFrame:
+        """简单的尖峰检测：中间高两边低或中间低两边高"""
+        if len(query_df) < 5:  # 至少需要5个点才能检测尖峰
+            query_df["is_spike"] = False
             return query_df
         
-        # 计算一阶导数（变化率）
-        query_df["derivative"] = query_df["value"].diff().abs()
+        query_df["is_spike"] = False
+        values = query_df["value"].values
         
-        # 计算导数的统计信息
-        derivative_mean = query_df["derivative"].mean()
-        derivative_std = query_df["derivative"].std()
-        
-        if derivative_std > 0:
-            # 基于z-score的导数检测
-            query_df["derivative_zscore"] = (query_df["derivative"] - derivative_mean) / derivative_std
-            query_df["is_derivative_spike"] = query_df["derivative_zscore"] > self.derivative_threshold
-        else:
-            query_df["is_derivative_spike"] = False
-        
-        return query_df
-
-    def _detect_spikes_by_pattern(self, query_df: pd.DataFrame) -> pd.DataFrame:
-        """基于模式的峰值检测"""
-        if not self.enable_pattern_detection or len(query_df) < 5:
-            query_df["is_pattern_spike"] = False
-            return query_df
-        
-        # 检测尖峰模式：突然上升然后快速下降
-        query_df["is_pattern_spike"] = False
-        
-        for i in range(2, len(query_df) - 2):
-            current = query_df.iloc[i]["value"]
-            prev_2 = query_df.iloc[i-2]["value"]
-            prev_1 = query_df.iloc[i-1]["value"]
-            next_1 = query_df.iloc[i+1]["value"]
-            next_2 = query_df.iloc[i+2]["value"]
+        # 遍历每个可能的尖峰中心点
+        for i in range(2, len(values) - 2):
+            current = values[i]
             
-            # 尖峰模式：中间值明显高于前后值
-            if (current > prev_1 * 1.5 and current > next_1 * 1.5 and
-                current > prev_2 * 1.3 and current > next_2 * 1.3):
-                query_df.iloc[i, query_df.columns.get_loc("is_pattern_spike")] = True
-        
-        return query_df
-
-    def _merge_spike_detections(self, query_df: pd.DataFrame) -> pd.DataFrame:
-        """合并多种检测结果"""
-        # 综合判断是否为峰值
-        query_df["is_spike_final"] = (
-            query_df["is_spike"] |
-            query_df["is_derivative_spike"] |
-            query_df["is_pattern_spike"]
-        )
+            # 获取左右两端的值（用于对比）
+            left_values = values[i-2:i]  # 左边2个点
+            right_values = values[i+1:i+3]  # 右边2个点
+            
+            # 计算左右两端的平均值
+            left_avg = float(np.mean(left_values.astype(float)))
+            right_avg = float(np.mean(right_values.astype(float)))
+            both_avg = (left_avg + right_avg) / 2
+            
+            # 使用统一的倍数比较方式，避免除法问题
+            # 计算当前值相对于两端平均值的倍数
+            if both_avg > 1e-3:  # 避免除零
+                current_ratio = current / both_avg
+            else:
+                continue  # 如果两端平均值太小，跳过检测
+            
+            # 检测向上尖峰：当前值比两端平均值高很多
+            if current_ratio >= self.spike_threshold:
+                print(f"🔍 检测到向上尖峰: 当前值={current:.1f}, 两端平均={both_avg:.1f}, 倍数={current_ratio:.2f}x >= {self.spike_threshold:.1f}")
+                
+                # 检查是否形成平台（连续几个点都高）
+                platform_length = 1
+                for j in range(i+1, min(i+self.max_duration, len(values))):
+                    if both_avg > 1e-6 and values[j] / both_avg >= self.spike_threshold:
+                        platform_length += 1
+                    else:
+                        break
+                
+                # 检查平台长度是否在合理范围内
+                if self.min_duration <= platform_length <= self.max_duration:
+                    # 计算整个spike段的倍数变化，确保与提取阶段逻辑一致
+                    spike_start = max(0, i-3)
+                    spike_end = min(len(values)-1, i+platform_length+2)
+                    before_values = values[spike_start:i] if i > spike_start else []
+                    after_values = values[i+platform_length:spike_end] if spike_end > i+platform_length else []
+                    
+                    if len(before_values) > 0 and len(after_values) > 0:
+                        baseline_avg = (float(np.mean(before_values)) + float(np.mean(after_values))) / 2
+                        spike_ratio = current / max(baseline_avg, 1e-6)
+                        
+                        # 只有真正达到阈值要求的才标记为spike
+                        if spike_ratio >= self.spike_threshold:
+                            for k in range(i, min(i+platform_length, len(query_df))):
+                                query_df.iloc[k, query_df.columns.get_loc("is_spike")] = True
+            
+            # 检测向下尖峰：当前值比两端平均值低很多
+            elif current_ratio <= (1.0 / self.spike_threshold):
+                print(f"🔍 检测到向下尖峰: 当前值={current:.1f}, 两端平均={both_avg:.1f}, 倍数={current_ratio:.2f}x <= {1.0/self.spike_threshold:.2f}")
+                
+                # 检查是否形成平台（连续几个点都低）
+                platform_length = 1
+                for j in range(i+1, min(i+self.max_duration, len(values))):
+                    if both_avg > 1e-6 and values[j] / both_avg <= (1.0 / self.spike_threshold):
+                        platform_length += 1
+                    else:
+                        break
+                
+                # 检查平台长度是否在合理范围内
+                if self.min_duration <= platform_length <= self.max_duration:
+                    # 计算整个spike段的倍数变化，确保与提取阶段逻辑一致
+                    spike_start = max(0, i-3)
+                    spike_end = min(len(values)-1, i+platform_length+2)
+                    before_values = values[spike_start:i] if i > spike_start else []
+                    after_values = values[i+platform_length:spike_end] if spike_end > i+platform_length else []
+                    
+                    if len(before_values) > 0 and len(after_values) > 0:
+                        baseline_avg = (float(np.mean(before_values)) + float(np.mean(after_values))) / 2
+                        spike_ratio = current / max(baseline_avg, 1e-6)
+                        
+                        # 只有真正达到阈值要求的才标记为spike
+                        if spike_ratio <= (1.0 / self.spike_threshold):
+                            for k in range(i, min(i+platform_length, len(query_df))):
+                                query_df.iloc[k, query_df.columns.get_loc("is_spike")] = True
         return query_df
 
     def _extract_spike_segments(self, query_df: pd.DataFrame) -> list[dict]:
         """提取峰值段"""
-        if not bool(query_df["is_spike_final"].any()):
+        if not query_df["is_spike"].any():
             return []
         
         # 找连续峰值段
-        grp_id = (query_df["is_spike_final"].ne(query_df["is_spike_final"].shift())).cumsum()
+        grp_id = (query_df["is_spike"].ne(query_df["is_spike"].shift())).cumsum()
         query_df["grp"] = grp_id
         
         spike_segments = []
         for _, seg in query_df.groupby("grp"):
-            if not bool(seg["is_spike_final"].iloc[0]):
+            if not seg["is_spike"].iloc[0]:
                 continue
                 
             seg = seg.sort_values("timestamp")
-            duration_seconds = (seg["timestamp"].iloc[-1] - seg["timestamp"].iloc[0]).total_seconds()
+            duration_points = len(seg)  # 使用数据点数量而不是时间
             
-            # 检查持续时间要求
-            if (duration_seconds >= self.min_spike_duration_seconds and 
-                duration_seconds <= self.max_spike_duration_seconds):
+            # 检查持续时间要求（数据点数量）
+            if self.min_duration <= duration_points <= self.max_duration:
                 
-                # 计算峰值特征
-                peak_value = seg["value"].max()
-                peak_time = seg.loc[seg["value"].idxmax(), "timestamp"]
-                baseline_ratio = peak_value / max(seg["baseline_ratio"].iloc[0], 1e-6)
+                # 判断是向上尖峰还是向下尖峰
+                seg_values = seg["value"].values
+                max_value = seg_values.max()
+                min_value = seg_values.min()
                 
-                # 计算异常分数
-                anomaly_score = max(
-                    seg["baseline_ratio"].max(),
-                    seg["local_ratio"].max() if "local_ratio" in seg.columns else 0,
-                    seg["derivative_zscore"].max() if "derivative_zscore" in seg.columns else 0
-                )
+                # 通过比较最大值和最小值与两端数据的关系来判断尖峰类型
+                # 获取尖峰段前后的数据点来计算对比基准
+                seg_start_idx = seg.index[0]
+                seg_end_idx = seg.index[-1]
                 
+                # 获取尖峰前后的数据点
+                before_values = query_df.loc[max(0, seg_start_idx-3):seg_start_idx-1, "value"] if seg_start_idx > 0 else pd.Series()
+                after_values = query_df.loc[seg_end_idx+1:min(len(query_df)-1, seg_end_idx+3), "value"] if seg_end_idx < len(query_df)-1 else pd.Series()
+                
+                if not before_values.empty and not after_values.empty:
+                    baseline_avg = (before_values.mean() + after_values.mean()) / 2
+                    
+                    # 判断尖峰类型并计算相应的特征值
+                    max_ratio = max_value / max(baseline_avg, 1e-6)
+                    min_ratio = min_value / max(baseline_avg, 1e-6)
+                    
+                    if max_ratio >= self.spike_threshold:
+                        # 向上尖峰：使用最大值
+                        peak_value = max_value
+                        peak_time = seg.loc[seg["value"].idxmax(), "timestamp"]
+                        spike_ratio = max_ratio
+                        spike_type = "upward"
+                    elif min_ratio <= (1.0 / self.spike_threshold):
+                        # 向下尖峰：使用最小值
+                        peak_value = min_value
+                        peak_time = seg.loc[seg["value"].idxmin(), "timestamp"]
+                        spike_ratio = min_ratio
+                        spike_type = "downward"
+                    else:
+                        # 无法确定类型，使用默认值
+                        peak_value = max_value
+                        peak_time = seg.loc[seg["value"].idxmax(), "timestamp"]
+                        spike_ratio = 1.0
+                        spike_type = "unknown"
+                else:
+                    peak_value = max_value
+                    peak_time = seg.loc[seg["value"].idxmax(), "timestamp"]
+                    spike_ratio = 1.0
+                    spike_type = "unknown"
+                
+                # 计算异常分数（基于倍数变化）
+                # 对于向下尖峰，使用1/spike_ratio来确保分数越大表示异常越严重
+                if spike_type == "downward":
+                    anomaly_score = 1.0 / max(spike_ratio, 1e-6)  # 向下尖峰：分数越大越异常
+                else:
+                    anomaly_score = spike_ratio  # 向上尖峰：直接使用倍数
+                
+                # 由于检测阶段已经做了完整的阈值验证，这里直接添加
                 spike_segments.append({
                     "start": seg["timestamp"].iloc[0],
                     "end": seg["timestamp"].iloc[-1],
                     "peak_time": peak_time,
                     "peak_value": peak_value,
-                    "baseline_ratio": baseline_ratio,
-                    "duration_seconds": duration_seconds,
+                    "spike_ratio": spike_ratio,
+                    "spike_type": spike_type,
+                    "duration_points": duration_points,
                     "anomaly_score": anomaly_score,
                     "segment_data": seg
+                })
+        
+        # 按异常分数排序，优先返回最显著的峰值
+        spike_segments.sort(key=lambda x: x["anomaly_score"], reverse=True)
+        
+        # 调试信息
+        if self.debug_mode and spike_segments:
+            # 从query_df中获取kpi_name和cmdb_id
+            kpi_name = query_df["kpi_name"].iloc[0] if "kpi_name" in query_df.columns and not query_df.empty else "unknown"
+            cmdb_id = query_df["cmdb_id"].iloc[0] if "cmdb_id" in query_df.columns and not query_df.empty else "unknown"
+            
+            for i, segment in enumerate(spike_segments):
+                spike_type_emoji = "🚀" if segment['spike_type'] == "upward" else "📉" if segment['spike_type'] == "downward" else "❓"
+                
+                # 获取spike相关的sequence数据
+                seg_data = segment.get('segment_data', pd.DataFrame())
+                seg_start_idx = seg_data.index[0] if not seg_data.empty else 0
+                seg_end_idx = seg_data.index[-1] if not seg_data.empty else 0
+                
+                # 获取before_values, spike_values, after_values
+                before_values = query_df.loc[max(0, seg_start_idx-3):seg_start_idx-1, "value"] if seg_start_idx > 0 else pd.Series()
+                spike_values = seg_data["value"] if not seg_data.empty else pd.Series()
+                after_values = query_df.loc[seg_end_idx+1:min(len(query_df)-1, seg_end_idx+3), "value"] if seg_end_idx < len(query_df)-1 else pd.Series()
+                
+                # 格式化sequence数据用于显示
+                before_str = f"[{', '.join([f'{v:.2f}' for v in before_values.values])}]" if not before_values.empty else "[]"
+                spike_str = f"[{', '.join([f'{v:.2f}' for v in spike_values.values])}]" if not spike_values.empty else "[]"
+                after_str = f"[{', '.join([f'{v:.2f}' for v in after_values.values])}]" if not after_values.empty else "[]"
+                
+                self._debug_print(f"📊 Spike {i+1} 详细信息 ({cmdb_id} - {kpi_name})", {
+                    "⏰ 时间信息": f"{segment['start']} ~ {segment['end']}",
+                    "🎯 峰值时间": segment["peak_time"],
+                    "📈 峰值数值": f"{segment['peak_value']:.2f}",
+                    "📊 倍数变化": f"{segment['spike_ratio']:.2f}x",
+                    "🔍 尖峰类型": f"{spike_type_emoji} {segment['spike_type']}",
+                    "⏱️ 持续点数": f"{segment['duration_points']}个点",
+                    "🔥 异常分数": f"{segment['anomaly_score']:.3f}",
+                    "📉 前置序列": before_str,
+                    "📈 尖峰序列": spike_str,
+                    "📊 后置序列": after_str
                 })
         
         return spike_segments
@@ -349,7 +431,7 @@ class SpikeDetector:
             full_df: 该指标全量数据
             cmdb_id: 服务ID
             metric_name: 指标名称
-            baseline_df: 正常段数据
+            baseline_df: 正常段数据（不再使用，保留接口兼容性）
             start_time: 待检测时间段开始
             end_time: 待检测时间段结束
             
@@ -358,11 +440,7 @@ class SpikeDetector:
         """
         results: list[dict] = []
         
-        if baseline_df.empty:
-            return results
-        
         # 重采样数据
-        base = _resample(baseline_df, self.resample_rule)
         query_df = _resample(
             full_df[(full_df["timestamp"] >= start_time) & (full_df["timestamp"] <= end_time)],
             self.resample_rule
@@ -371,18 +449,15 @@ class SpikeDetector:
         if query_df.empty:
             return results
         
-        # 计算基线统计信息
-        baseline_mean = float(base["value"].mean())
-        baseline_std = float(base["value"].std(ddof=0)) if len(base) > 1 else 0.0
+        # 使用简化的尖峰检测
+        query_df = self._detect_simple_spikes(query_df)
         
-        # 多种峰值检测方法
-        query_df = self._detect_spikes_by_threshold(query_df, baseline_mean, baseline_std)
-        query_df = self._detect_spikes_by_derivative(query_df)
-        query_df = self._detect_spikes_by_pattern(query_df)
-        query_df = self._merge_spike_detections(query_df)
+        print(query_df)
         
         # 提取峰值段
         spike_segments = self._extract_spike_segments(query_df)
+        
+        print(spike_segments)
         
         # 转换为结果格式
         for segment in spike_segments:
@@ -394,15 +469,18 @@ class SpikeDetector:
                 "end": segment["end"],
                 "peak_time": segment["peak_time"],
                 "peak_value": segment["peak_value"],
-                "baseline_ratio": segment["baseline_ratio"],
-                "duration_seconds": segment["duration_seconds"],
+                "spike_ratio": segment["spike_ratio"],
+                "spike_type": segment["spike_type"],
+                "duration_points": segment["duration_points"],
                 "anomaly_score": segment["anomaly_score"],
                 "spike_characteristics": {
-                    "height": segment["peak_value"] - baseline_mean,
-                    "sharpness": segment["anomaly_score"],
-                    "duration_category": "short" if segment["duration_seconds"] < 60 else "medium"
+                    "spike_ratio": segment["spike_ratio"],
+                    "spike_type": segment["spike_type"],
+                    "duration_points": segment["duration_points"],
+                    "detection_method": "simple_spike_detection"
                 }
             })
+            print(results)
         
         return results
 
@@ -526,6 +604,8 @@ class MetricAnalyzer:
         for key, full_df in self.metrics.items():
             cmdb_id, metric_name = key.split("::", 1)
             baseline_df = self._baseline_df_for(full_df)
+            if cmdb_id != "node-5.checkoutservice-2" or metric_name != "container_memory_failures.container.pgfault":
+                continue
             for detector in self.detectors:
                 results.extend(detector.detect(full_df, cmdb_id, metric_name, baseline_df, start_time, end_time))
         if AGGREGATE_MODE:
@@ -1175,7 +1255,8 @@ class TraceAnalyzer:
             all_df.append(df)
         if all_df:
             self.traces = pd.concat(all_df, ignore_index=True).dropna(subset=["timestamp", "cmdb_id", "trace_id", "span_id"])
-            self.traces = self.traces.sort_values("timestamp").reset_index(drop=True)
+            if self.traces is not None:
+                self.traces = self.traces.sort_values("timestamp").reset_index(drop=True)
             
     def load_traces_for_openrca(self, folder_path: Path, analysis_start_time: datetime, analysis_end_time: datetime) -> None:
         """
@@ -1252,8 +1333,9 @@ class TraceAnalyzer:
         
         if all_df:
             self.traces = pd.concat(all_df, ignore_index=True).dropna(subset=["timestamp", "cmdb_id", "trace_id", "span_id"])
-            self.traces = self.traces.sort_values("timestamp").reset_index(drop=True)
-            print(f"    成功加载trace数据，共 {len(self.traces)} 条记录")
+            if self.traces is not None:
+                self.traces = self.traces.sort_values("timestamp").reset_index(drop=True)
+                print(f"    成功加载trace数据，共 {len(self.traces)} 条记录")
         else:
             self.traces = None
             print("    未找到可用的trace文件")
@@ -1586,6 +1668,7 @@ def generate_openrca_cases(
             
             case = {
                 "fault_time_window": time_range_str,
+                "instruction": instruction,
                 "anomaly_information": [serialize(a) for a in anomaly_information],
                 "ground_truth": ground_truth
             }
@@ -1597,7 +1680,6 @@ def generate_openrca_cases(
                 json.dump(case, f, ensure_ascii=False, indent=4)
             
             print(f"  已生成: {output_file.name}")
-            break
             
         except Exception as e:
             print(f"  处理任务 {task_index} 时出错: {e}")
@@ -1621,7 +1703,13 @@ if __name__ == "__main__":
     
     metric_analyzer = MetricAnalyzer(filter_file_name_list=["metric_mesh.csv", "metric_node.csv", "metric_runtime.csv"])
     metric_analyzer.register_detector(SASDetector(n_sigma=5, min_duration_minutes=5))
-    metric_analyzer.register_detector(SpikeDetector(spike_threshold=10, min_spike_duration_seconds=30, max_spike_duration_seconds=60, relative_threshold=8, resample_rule="15s"))
+    metric_analyzer.register_detector(SpikeDetector(
+        spike_threshold=2.0,                    # 峰值检测阈值（相对于两端数据的倍数）
+        min_duration=1,                         # 最小峰值持续时间（数据点数量）
+        max_duration=3,                        # 最大峰值持续时间（数据点数量）
+        resample_rule="10s" if ANALYZE_PLATFORM == "AIOps-Bravo" else "1min",                    # 重采样规则
+        debug_mode=True                         # 启用调试模式，显示详细信息
+    ))
     
     log_analyzer = LogAnalyzer(data_root_path)
     log_analyzer.register_detector(
