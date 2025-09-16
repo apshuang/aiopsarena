@@ -1,0 +1,24 @@
+INJECT_TYPE 统计结果
+================================================================================
+
+总计发现 17 种不同的inject_type:
+------------------------------------------------------------
+StressChaos-cpu                                    : 247 个case
+HTTPChaos-delay                                    : 242 个case
+StressChaos-memory                                 : 109 个case
+container read I/O load                            :   6 个case
+container network packet corruption                :   5 个case
+node memory consumption                            :   4 个case
+node disk write I/O consumption                    :   4 个case
+container memory load                              :   4 个case
+container CPU load                                 :   3 个case
+node disk read I/O consumption                     :   3 个case
+node disk space consumption                        :   3 个case
+container network packet retransmission            :   3 个case
+container packet loss                              :   2 个case
+node CPU load                                      :   2 个case
+container network latency                          :   2 个case
+node CPU spike                                     :   1 个case
+container process termination                      :   1 个case
+
+总计处理了 641 个case文件
