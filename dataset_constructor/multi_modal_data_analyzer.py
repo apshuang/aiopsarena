@@ -14,6 +14,14 @@ import pandas as pd
 import numpy as np
 
 AGGREGATE_MODE = True
+FILTER_MODE = True
+FILTER_METRIC_LIST = [
+    "container_last_seen",
+    "container_memory_failures.container.pgfault",
+    "container_memory_failures.hierarchy.pgfault",
+    "container_memory_failures.pgfault",
+    "container_memory_failures.total",
+]
 
 # =============================
 # 异常检测器接口（传时间范围，不直接给 query_df）
@@ -362,10 +370,12 @@ class MetricAnalyzer:
         groups = defaultdict(list)
 
         for anomaly in anomalies:
-            if ANALYZE_PLATFORM == "OpenRCA":
-                cmdb_id = self.normalize_cmdb_id_OpenRCA(anomaly["cmdb_id"])
-            elif ANALYZE_PLATFORM == "AIOps-Bravo":
+            if ANALYZE_PLATFORM == "AIOps-Bravo":
                 cmdb_id = self.normalize_cmdb_id(anomaly["cmdb_id"])
+            elif ANALYZE_PLATFORM == "OpenRCA":
+                # 由于在OpenRCA中，有service、node、pod三种level的故障级别，所以不能够全部聚合成service
+                cmdb_id = anomaly["cmdb_id"]
+                # cmdb_id = self.normalize_cmdb_id_OpenRCA(anomaly["cmdb_id"])
             key = (cmdb_id, anomaly["pattern"], anomaly["metric_name"])
             groups[key].append(anomaly)
 
@@ -383,6 +393,11 @@ class MetricAnalyzer:
                 "end": max(end_times).isoformat(),
                 "anomaly_score": max(scores)
             }
+            if FILTER_MODE:
+                if aggregated["anomaly_score"] <= 2 or aggregated["anomaly_score"] >= 1000:
+                    continue
+                if aggregated["metric_name"] in FILTER_METRIC_LIST:
+                    continue
             results.append(aggregated)
 
         return results
@@ -1468,7 +1483,7 @@ def generate_openrca_cases(
                 json.dump(case, f, ensure_ascii=False, indent=4)
             
             print(f"  已生成: {output_file.name}")
-            break
+            # break
             
         except Exception as e:
             print(f"  处理任务 {task_index} 时出错: {e}")
@@ -1477,7 +1492,7 @@ def generate_openrca_cases(
     print(f"OpenRCA分析完成，共处理 {len(df)} 个任务")
 
 
-ANALYZE_PLATFORM = "AIOps-Bravo"  # 设置分析的目标平台
+ANALYZE_PLATFORM = "OpenRCA"  # 设置分析的目标平台
 
 if __name__ == "__main__":
     # 设置多模态数据的根目录
