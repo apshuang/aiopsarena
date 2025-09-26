@@ -34,6 +34,11 @@ normal_metrics = [
     # threads
     "container_threads",
     "container_threads_max",
+    # filesystem
+    "container_fs_reads_total",
+    "container_fs_writes_total",
+    "container_fs_reads_bytes_total",
+    "container_fs_writes_bytes_total",
     # network
     "container_network_receive_errors_total",
     "container_network_receive_packets_dropped_total",
