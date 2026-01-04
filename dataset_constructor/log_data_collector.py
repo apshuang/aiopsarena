@@ -375,7 +375,9 @@ async def main():
     # await maintainer.start()
 
     # 或者：提取某一天的所有日志
-    await extract_full_day(maintainer, "2025-09-07", tz=timezone(timedelta(hours=8)))  # 输入北京时间
+    day_list = [4, 5, 6, 7, 8, 9, 10]
+    for day in day_list:
+        await extract_full_day(maintainer, f"2025-12-{day}", tz=timezone(timedelta(hours=8)))  # 输入北京时间
 
 
 if __name__ == "__main__":

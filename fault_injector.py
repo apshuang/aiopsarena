@@ -70,7 +70,7 @@ class FaultDataGenerator:
     def generate_cpu_stress_fault(self):
         """生成CPU类型的stress故障"""
         app = random.choice(self.apps)
-        duration = f"{random.randint(2, 7)}m"
+        duration = f"{random.randint(2, 5)}m"
         name = self.get_timestamp_name()
         data = {
             "name": name,
@@ -91,7 +91,7 @@ class FaultDataGenerator:
     def generate_memory_stress_fault(self):
         """生成Memory类型的stress故障"""
         app = random.choice(self.apps)
-        duration = f"{random.randint(2, 7)}m"
+        duration = f"{random.randint(2, 5)}m"
         name = self.get_timestamp_name()
         data = {
             "name": name,
@@ -112,7 +112,7 @@ class FaultDataGenerator:
     def generate_http_fault(self):
         app = random.choice(self.apps)
         name = self.get_timestamp_name()
-        duration = f"{random.randint(2, 7)}m"
+        duration = f"{random.randint(2, 5)}m"
         data = {
             "name": name,
             "app": app,
@@ -248,14 +248,14 @@ class Scheduler:
             json.dump(self.state, f)
 
     def get_current_window_start(self, now):
-        """ 获取当前时间所属的30分钟窗口起点（UTC） """
-        minute = 0 if now.minute < 30 else 30
+        """ 获取当前时间所属的20分钟窗口起点（UTC） """
+        minute = 0 if now.minute < 20 else 20 if now.minute < 40 else 40
         return now.replace(minute=minute, second=0, microsecond=0)
 
     def compute_injection_time(self, window_start):
-        """ 随机生成注入时间，范围：窗口开始+3min 到 窗口开始+23min """
-        valid_start = window_start + timedelta(minutes=3)
-        valid_end = window_start + timedelta(minutes=23)
+        """ 随机生成注入时间，范围：窗口开始+2min 到 窗口开始+14min """
+        valid_start = window_start + timedelta(minutes=2)
+        valid_end = window_start + timedelta(minutes=14)
         delta_seconds = int((valid_end - valid_start).total_seconds())
         random_offset = random.randint(0, delta_seconds)
         return valid_start + timedelta(seconds=random_offset)
@@ -293,7 +293,7 @@ class Scheduler:
                     logger.info(f"Scheduled injection at {inject_time.isoformat()} for window {window_key}")
 
                 if not injected and now >= inject_time:
-                    # 如果此刻已经到达了注入时间，那么就生成故障并注入（因为在生成后2分钟才能注入，所以时间窗口也需改成3min-23min）
+                    # 如果此刻已经到达了注入时间，那么就生成故障并注入（因为在生成后2分钟才能注入，所以时间窗口也需改成2min-14min）
                     # 生成并注入故障
                     data = self.generator.generate_random_fault()
                     self.injector.inject(data)

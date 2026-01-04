@@ -10,7 +10,7 @@ dataset_dir: 'dataset_collector/dataset'
 algorithm_dir: djangoTemplate
 namespace: default
 es_use_cert: 'False'
-es_cert_path: './ca.pem'
+es_cert_path: './ca.crt'
 
 # chaos type
 chaos_type: 'NetworkChaos PodChaos HttpChaos StressChaos'

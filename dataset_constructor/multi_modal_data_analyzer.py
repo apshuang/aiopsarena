@@ -297,7 +297,17 @@ class MetricAnalyzer:
         self.baseline_duration = baseline_duration
         self.filter_file_name_list = filter_file_name_list
 
-    def load_metrics_from_folder(self, folder_path: Path) -> None:
+    def load_metrics_from_folder(self, folder_path: Path, clear_existing: bool = False) -> None:
+        """
+        从文件夹加载指标数据
+        
+        Args:
+            folder_path: 包含CSV文件的文件夹路径
+            clear_existing: 如果为True，清空现有数据后再加载；如果为False，追加到现有数据（默认）
+        """
+        if clear_existing:
+            self.metrics.clear()
+            
         files = [folder_path / f for f in os.listdir(folder_path) if f.endswith(".csv") and f not in self.filter_file_name_list]
         for file in files:
             df = pd.read_csv(file)
@@ -328,6 +338,10 @@ class MetricAnalyzer:
                 
         for key in self.metrics:
             self.metrics[key] = self.metrics[key].sort_values("timestamp").reset_index(drop=True)
+    
+    def clear_metrics(self) -> None:
+        """清空所有已加载的指标数据，释放内存"""
+        self.metrics.clear()
 
     def _baseline_df_for(self, df: pd.DataFrame) -> pd.DataFrame:
         return _ensure_time_window(df, self.baseline_start_tod, self.baseline_duration)
@@ -716,12 +730,17 @@ class LogAnalyzer:
 
         cache_key = f"{date_str}_{hour_str}"
 
-        # 清理旧缓存，保持缓存量 <= max_cache_hours
-        if cache_key not in self.loaded_log:
-            if len(self.loaded_log) >= self.max_cache_hours:
-                self.loaded_log.clear()  # 清掉旧的
-        else:
+        # 如果缓存中已有，直接返回
+        if cache_key in self.loaded_log:
             return self.loaded_log[cache_key]
+
+        # 清理旧缓存，保持缓存量 <= max_cache_hours
+        # 使用FIFO策略：删除最旧的缓存项
+        if len(self.loaded_log) >= self.max_cache_hours:
+            # 删除最旧的缓存项（字典的第一个键）
+            if self.loaded_log:
+                oldest_key = next(iter(self.loaded_log))
+                del self.loaded_log[oldest_key]
 
         if not file_path.exists():
             return pd.DataFrame()
@@ -767,6 +786,10 @@ class LogAnalyzer:
 
         self.loaded_log[cache_key] = df
         return df
+    
+    def clear_log_cache(self) -> None:
+        """清空日志缓存，释放内存"""
+        self.loaded_log.clear()
 
     def register_detector(self, detector: LogAnomalyDetector) -> None:
         self.detectors.append(detector)
@@ -1358,8 +1381,8 @@ def generate_batch_cases(
         # 获取日期字符串用于数据加载
         date = window_start.strftime("%Y-%m-%d")
         
-        # 加载对应日期的数据
-        metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container")
+        # 加载对应日期的数据（清空旧数据以避免内存累积）
+        metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container", clear_existing=True)
         trace_analyzer.load_traces_from_folder(data_root_path / date / "trace")
         
         # 查询异常信息
@@ -1389,13 +1412,19 @@ def generate_batch_cases(
         
         print(f"已生成: {output_file.name}")
         
+        # 清理内存：处理完当前窗口后清空数据，避免内存累积
+        metric_analyzer.clear_metrics()
+        trace_analyzer.traces = None
+        log_analyzer.clear_log_cache()
+        
         
 # =============================
 # OpenRCA 分析函数
 # =============================
 
 # 设置CSV文件路径常量
-OPENRCA_CSV_PATH = "/home/ubuntu/ls/Market/cloudbed-1/query_simple_with_time.csv"
+# OPENRCA_CSV_PATH = "/home/ubuntu/ls/Market/cloudbed-1/query_simple_with_time.csv"
+OPENRCA_CSV_PATH = "/home/ubuntu/ls/aiops2025/query.csv"
 
 def generate_openrca_cases(
     metric_analyzer: MetricAnalyzer,
@@ -1452,8 +1481,8 @@ def generate_openrca_cases(
             # 获取日期字符串用于数据加载
             date = start_time.strftime("%Y-%m-%d")
             
-            # 加载对应日期的数据
-            metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container")
+            # 加载对应日期的数据（清空旧数据以避免内存累积）
+            metric_analyzer.load_metrics_from_folder(data_root_path / date / "metric" / "container", clear_existing=True)
             trace_analyzer.load_traces_for_openrca(data_root_path / date / "trace", start_time, end_time)
             
             # 查询异常信息
@@ -1483,6 +1512,11 @@ def generate_openrca_cases(
                 json.dump(case, f, ensure_ascii=False, indent=4)
             
             print(f"  已生成: {output_file.name}")
+            
+            # 清理内存：处理完当前任务后清空数据，避免内存累积
+            metric_analyzer.clear_metrics()
+            trace_analyzer.traces = None
+            log_analyzer.clear_log_cache()
             # break
             
         except Exception as e:
@@ -1499,10 +1533,10 @@ if __name__ == "__main__":
     if ANALYZE_PLATFORM == "AIOps-Bravo":
         data_root_path = Path("./multi_modal_data")
     elif ANALYZE_PLATFORM == "OpenRCA":
-        data_root_path = Path("/home/ubuntu/ls/Market/cloudbed-1/telemetry")
+        data_root_path = Path("/home/ubuntu/ls/aiops2025_processed/telemetry")
     
     # 设置案例的输出目录
-    output_folder = Path("./case")
+    output_folder = Path("./aiops2025_case")
     
     
     metric_analyzer = MetricAnalyzer(filter_file_name_list=["metric_mesh.csv", "metric_node.csv", "metric_runtime.csv"])
@@ -1541,12 +1575,13 @@ if __name__ == "__main__":
             password="elastic",
             database="chaos_mesh"
         )
-        batch_date_list = [6, 7]
+        batch_date_list = [2, 3, 4, 5, 6, 7, 8, 9]
+        # batch_date_list = [22]
         for _date in batch_date_list:
             # 设置时间范围（每半小时一个故障注入）
             tz = "Asia/Shanghai"
-            start = pd.Timestamp(datetime(2025, 9, _date, 1, 00, 0), tz=tz)
-            end   = pd.Timestamp(datetime(2025, 9, _date, 23, 59, 59), tz=tz)
+            start = pd.Timestamp(datetime(2025, 11, _date, 1, 00, 0), tz=tz)
+            end   = pd.Timestamp(datetime(2025, 11, _date, 23, 59, 59), tz=tz)
             
             # 使用批量化处理函数生成多个case
             generate_batch_cases(
@@ -1558,7 +1593,7 @@ if __name__ == "__main__":
                 ground_truth_extractor=ground_truth_extractor,
                 data_root_path=data_root_path,
                 output_folder=output_folder,
-                time_window_minutes=30  # 30分钟时间窗口
+                time_window_minutes=20  # 30分钟时间窗口
             )
         ground_truth_extractor.close_connection()
   
@@ -1570,7 +1605,7 @@ if __name__ == "__main__":
             user="root", 
             password="password",
             database="test",
-            record_file_path="/home/ubuntu/ls/Market/cloudbed-1/record_sorted.csv"
+            record_file_path="/home/ubuntu/ls/aiops2025/record_sorted.csv"
         )
         
         generate_openrca_cases(
